@@ -1,4 +1,4 @@
-# 🤖 Intelligent Chatbot
+# 🤖 Coddy Chatbot
 
 An advanced chatbot application designed to interact with users in real-time using Natural Language Processing (NLP) techniques. This project demonstrates a smart conversational agent that can answer questions, provide recommendations, and assist users in various tasks.
 
