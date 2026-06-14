@@ -1,0 +1,27 @@
+version: '3.8'
+
+services:
+  chatbot:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: coddy_chatbot
+    ports:
+      - "8000:8000"
+    environment:
+      - SECRET_KEY=super-secret-key-change-in-production-123456
+      - DATABASE_URL=sqlite:///./vector_store/coddy.db
+      - VECTOR_STORE_TYPE=chroma
+      - CHROMA_DB_PATH=./vector_store/chroma
+      - FAISS_DB_PATH=./vector_store/faiss
+      - EMBEDDING_MODEL_NAME=sentence-transformers/all-MiniLM-L6-v2
+      - LLM_PROVIDER=ollama
+      - OLLAMA_BASE_URL=http://host.docker.internal:11434
+      - OLLAMA_MODEL=deepseek-r1:1.5b
+      - UPLOAD_DIR=./uploads
+    volumes:
+      - ./uploads:/app/uploads
+      - ./vector_store:/app/vector_store
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    restart: unless-stopped

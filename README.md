@@ -1,86 +1,176 @@
-# 🤖 Coddy Chatbot
+# 🤖 CODDY – THE CHAT BOT
 
-An advanced chatbot application designed to interact with users in real-time using Natural Language Processing (NLP) techniques. This project demonstrates a smart conversational agent that can answer questions, provide recommendations, and assist users in various tasks.
-
----
-
-## 🚀 Features
-
-- 💬 Real-time chat interface
-- 🧠 NLP-powered responses
-- ✅ Handles general conversation, FAQs, and specific commands
-- ⚡ Fast and responsive UI
-- 🔧 Easy to integrate and extend
-- 🎨 Beautiful, user-friendly design
+**CODDY** is a production-ready, feature-rich Retrieval-Augmented Generation (RAG) chatbot designed to answer complex questions using documents uploaded to a private knowledge base. Powered by a FastAPI backend and a responsive glassmorphic HTML5/Tailwind CSS frontend, it integrates local LLM execution (via Ollama and DeepSeek-R1) and modular vector databases (ChromaDB and FAISS) to ensure maximum privacy, speed, and versatility.
 
 ---
 
-## ⚙️ Technologies Used
+## 🚀 Key Features
 
-- **Frontend:** HTML, CSS, JavaScript
-- **Backend:** Python (Flask)
-- **Machine Learning / NLP:** Pre-trained models or custom logic
-- **Other Tools:** WebSockets for real-time communication
+*   **Multiformat Document Support:** Upload and index `PDF`, `DOCX`, `TXT`, `CSV`, and `Markdown` documents.
+*   **Persistent Hybrid Search:** Combines semantic vector embeddings (Sentence Transformers) and keyword search (BM25) with weighted scoring (Reciprocal Rank Fusion).
+*   **Modular Architecture:** Support for switching vector databases (ChromaDB / FAISS) and LLM providers (Ollama / Hugging Face) purely via configuration.
+*   **Interactive Citations:** Responses include clickable source citations showing the exact matching segments of the source document in a popup modal.
+*   **Short & Long-Term Memory:** Stored session history in database, context-aware RAG pipelines using short-term memory (last 10 messages).
+*   **Voice Integration:** Supports Hands-Free voice input (Speech-to-Text) and output (Text-to-Speech) using the native Web Speech API.
+*   **Admin Dashboard:** Monitor system health, user counts, storage utilization (uploads and vector store indexes), and active model properties in real-time.
+*   **Secure Authentication:** Secure user registration, password hashing (bcrypt), and stateful token validation (JWT).
 
 ---
 
-## 📋 Installation
+## 📁 Repository Structure
 
-1. Clone the repository:
+```text
+CODDY-THE-CHAT-BOT/
+├── backend/
+│   ├── api/             # API Router endpoints (auth, chat, docs, admin)
+│   ├── auth/            # Security keys and password hashing utilities
+│   ├── database/        # Database engines and connection logic
+│   ├── models/          # SQLAlchemy Database Models
+│   ├── rag/             # RAG logic (extraction, chunking, embeddings, fusion)
+│   ├── services/        # LLM Provider abstractions (Ollama & Hugging Face)
+│   ├── utils/           # Configuration files and structured logger
+│   └── main.py          # FastAPI Entrypoint and Static Asset Mounting
+├── frontend/
+│   ├── css/             # Custom glassmorphism variables and styling
+│   ├── js/              # Application controller (chat streams, voice API, auth)
+│   └── index.html       # Landing and Dashboard user interface markup
+├── uploads/             # Persistent local uploaded document folder
+├── vector_store/        # Persistent Chroma/FAISS directory
+├── Dockerfile           # FastAPI + UI single container build schema
+├── docker-compose.yml   # Docker Compose orchestration
+├── requirements.txt     # Python Dependencies
+├── .env.example         # Template configuration settings
+└── README.md            # Setup and Deployment Documentation
+```
+
+---
+
+## ⚙️ Local Machine Installation
+
+### Prerequisites
+*   [Python 3.10+](https://www.python.org/) installed on your machine.
+*   [Ollama](https://ollama.com/) installed and running.
+    *   Pull the default model locally: `ollama pull deepseek-r1:1.5b`
+
+### Steps
+1.  **Clone the Repository:**
     ```bash
-    git clone https://github.com/your-username/chatbot.git
+    git clone https://github.com/your-username/CODDY-THE-CHAT-BOT.git
+    cd CODDY-THE-CHAT-BOT
     ```
-2. Navigate to the project folder:
+
+2.  **Create a Virtual Environment:**
     ```bash
-    cd chatbot
+    python -m venv venv
+    # On Windows:
+    venv\Scripts\activate
+    # On macOS/Linux:
+    source venv/bin/activate
     ```
-3. Install dependencies:
+
+3.  **Install Python Dependencies:**
     ```bash
     pip install -r requirements.txt
     ```
-4. Run the Flask server:
+
+4.  **Configure Environment Variables:**
+    Copy the template variables and adjust if necessary:
     ```bash
-    python app.py
+    cp .env.example .env
     ```
 
-5. Open your browser and go to:
+5.  **Run the Server:**
+    Start the FastAPI application:
+    ```bash
+    python backend/main.py
     ```
-    http://localhost:5000
+    *Alternatively, run with uvicorn directly:*
+    ```bash
+    uvicorn backend.main:app --reload --port 8000
     ```
 
----
-
-## 🛠️ How It Works
-
-1. User enters a message in the chat window.
-2. The frontend sends the message to the backend using an HTTP request or WebSocket.
-3. The backend processes the message using NLP logic or a pre-trained ML model.
-4. The chatbot generates a response and sends it back to the frontend.
-5. The user sees the reply in the chat interface.
+6.  **Access the Chatbot:**
+    Open your browser and navigate to:
+    [http://localhost:8000](http://localhost:8000)
 
 ---
 
-## 📚 Use Cases
+## 🐳 Docker Deployment
 
-- Customer Support Automation
-- Personal Assistant
-- FAQ Handling
-- Simple Entertainment Chatbot
+To launch the entire stack inside Docker, simply run:
 
----
+```bash
+docker-compose up --build
+```
 
-## 🌟 Future Improvements
-
-- Integrate advanced NLP models (e.g., GPT-based API)
-- Add voice input/output support
-- Implement sentiment analysis
-- Deploy the chatbot as a web service
+### Note on local Ollama connectivity:
+*   The `docker-compose.yml` configures `OLLAMA_BASE_URL` as `http://host.docker.internal:11434`. 
+*   If you are running Ollama on Windows/macOS, this resolves automatically to your host network. Make sure your local Ollama is configured to bind to all interfaces by setting the environment variable `OLLAMA_HOST=0.0.0.0` before launching the Ollama desktop app.
 
 ---
 
-## 📄 License
+## 🧪 Running Unit Tests
 
-This project is licensed under the MIT License.
+To run the automated test suite verifying auth tokens, chunk splits, extraction pipelines, and vector database indices:
+
+```bash
+pytest backend/tests/test_rag.py -v
+```
 
 ---
 
+## 🌐 Multi-Cloud Deployment Guide
+
+For production environments, configure `DATABASE_URL` to point to a managed SQL database (e.g. PostgreSQL) instead of SQLite.
+
+### 1. AWS (ECS + Fargate + RDS)
+*   **Database:** Provision an Amazon RDS PostgreSQL instance.
+*   **Deployment:**
+    1. Build the Docker image and push it to AWS ECR (Elastic Container Registry).
+    2. Create an ECS Task Definition using the Fargate launch type.
+    3. Expose port `8000` and pass variables (`DATABASE_URL`, `SECRET_KEY`, `LLM_PROVIDER`) via AWS Secrets Manager.
+    4. Attach an Application Load Balancer (ALB) to handle incoming traffic.
+    5. Set persistent folders (`/app/uploads`) to mount onto AWS EFS (Elastic File System) if hosting multiple instances.
+
+### 2. Google Cloud Platform (Cloud Run + Cloud SQL)
+*   **Database:** Create a Google Cloud SQL PostgreSQL database instance.
+*   **Deployment:**
+    1. Build and submit your Docker container to Artifact Registry using Google Cloud Build:
+       ```bash
+       gcloud builds submit --tag gcr.io/your-project-id/coddy-chatbot
+       ```
+    2. Deploy container to Google Cloud Run:
+       ```bash
+       gcloud run deploy coddy-chatbot \
+         --image gcr.io/your-project-id/coddy-chatbot \
+         --platform managed \
+         --allow-unauthenticated \
+         --set-env-vars="DATABASE_URL=postgresql://user:pass@/dbname?host=/cloudsql/conn-name"
+       ```
+    3. Connect Cloud Run to Cloud SQL via SQL Connection Name.
+
+### 3. Microsoft Azure (App Service)
+*   **Database:** Create an Azure Database for PostgreSQL server.
+*   **Deployment:**
+    1. Create an Azure App Service choosing "Docker Container" and runtime "Linux".
+    2. Configure "Deployment Center" to pull from Docker Hub or a private registry.
+    3. Under App Service Configuration, add the Application Settings:
+       * `DATABASE_URL`: Your Azure PostgreSQL connection string.
+       * `SECRET_KEY`: JWT Signing Key.
+       * `VECTOR_STORE_TYPE`: `chroma` (App Service handles local path persistence under standard storage).
+
+### 4. Railway (Fast deployment)
+1. Push this repository to GitHub.
+2. Link Railway to your GitHub repository.
+3. Add the **PostgreSQL Plugin** to your Railway project.
+4. Railway automatically populates `DATABASE_URL`. Map the rest of your variables (`SECRET_KEY`, `VECTOR_STORE_TYPE`, `LLM_PROVIDER`) under variables settings.
+5. Deployment will compile and run automatically.
+
+### 5. Render
+1. Create a new "Web Service" on Render and connect your GitHub repository.
+2. Set Environment to "Docker".
+3. Under Environment Variables, add:
+   * `DATABASE_URL` (provision a Render PostgreSQL instance and copy external connection string).
+   * `SECRET_KEY` (your private key).
+   * `LLM_PROVIDER` (if connecting to a remote LLM API like Hugging Face, or set to `ollama` if routing to an external endpoint).
+4. Add a "Disk" mount at `/app/uploads` and `/app/vector_store` to ensure local index files persist between deploys.
