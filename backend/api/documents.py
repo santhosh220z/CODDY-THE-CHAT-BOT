@@ -1,307 +1,324 @@
+from __future__ import annotations
+
+import json
 import os
 import uuid
-import json
 from typing import List
-from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, status
+
+from fastapi import APIRouter, Depends, File, HTTPException, Request, UploadFile, status
+from pydantic import BaseModel
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from backend.api.auth import get_current_user
 from backend.database.connection import get_db
 from backend.models.models import Document, DocumentChunk, User
-from backend.api.auth import get_current_user
-from backend.rag.document_processor import DocumentProcessor
+from backend.rag.document_processor import DocumentProcessingError, process_document
 from backend.rag.embeddings import EmbeddingManager
+from backend.rag.pipeline import invalidate_retrieval_cache
 from backend.rag.vector_store import get_vector_store
 from backend.utils.config import settings
 from backend.utils.logging import logger
 
-router = APIRouter(prefix="/api/documents", tags=["Documents"])
+router = APIRouter(prefix="/api/documents", tags=["documents"])
 
-ALLOWED_EXTENSIONS = {".pdf", ".docx", ".txt", ".csv", ".md", ".markdown"}
-MAX_FILE_SIZE = 15 * 1024 * 1024 # 15MB
+# Magic bytes per extension. An extension check alone accepts any file renamed
+# to .pdf, which then goes straight into a parser.
+MAGIC = {
+    ".pdf": [b"%PDF"],
+    ".docx": [b"PK\x03\x04", b"PK\x05\x06"],  # zip/OOXML container
+}
+# Text formats have no reliable signature; they are validated by decoding.
+_TEXTUAL = {".txt", ".md", ".markdown", ".csv"}
 
-def validate_file(file: UploadFile):
-    ext = os.path.splitext(file.filename)[1].lower()
-    if ext not in ALLOWED_EXTENSIONS:
+
+def _validate_extension(filename: str) -> str:
+    ext = os.path.splitext(filename)[1].lower()
+    if ext not in settings.allowed_extensions:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"Unsupported file format '{ext}'. Allowed formats: PDF, DOCX, TXT, CSV, MD."
+            detail=f"Unsupported file type '{ext}'. Allowed: "
+            f"{', '.join(sorted(settings.allowed_extensions))}.",
         )
-    # Check size if possible (note: file.size is available in newer starlette/fastapi,
-    # fallback to seek check if needed)
-    try:
-        file.file.seek(0, os.SEEK_END)
-        size = file.file.tell()
-        file.file.seek(0)
-        if size > MAX_FILE_SIZE:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail=f"File exceeds maximum size of 15MB."
-            )
-    except Exception as e:
-        if isinstance(e, HTTPException):
-            raise e
-        logger.warning(f"Could not determine file size during validation: {e}")
+    return ext
 
-@router.post("/upload", status_code=status.HTTP_201_CREATED)
+
+def _check_magic(ext: str, header: bytes) -> None:
+    expected = MAGIC.get(ext)
+    if expected and not any(header.startswith(sig) for sig in expected):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="File contents do not match the file extension.",
+        )
+
+
+def _can_access(user: User, document: Document) -> bool:
+    return user.role == "admin" or document.owner_id == user.id
+
+
+async def _save_upload(file: UploadFile) -> tuple[str, int]:
+    """Stream to disk, enforcing the size cap as we go.
+
+    The file is never named by the client, so a crafted name cannot escape the
+    upload directory.
+    """
+    ext = _validate_extension(file.filename or "upload")
+    os.makedirs(settings.UPLOAD_DIR, exist_ok=True)
+
+    stored_name = f"{uuid.uuid4().hex}{ext}"
+    destination = os.path.abspath(os.path.join(settings.UPLOAD_DIR, stored_name))
+
+    # Belt and braces: even though the name is generated, refuse anything that
+    # does not land inside UPLOAD_DIR.
+    if os.path.commonpath([destination, os.path.abspath(settings.UPLOAD_DIR)]) != os.path.abspath(
+        settings.UPLOAD_DIR
+    ):
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid upload path.")
+
+    written = 0
+    try:
+        with open(destination, "wb") as out:
+            while True:
+                block = await file.read(1024 * 1024)
+                if not block:
+                    break
+                written += len(block)
+                if written > settings.MAX_UPLOAD_BYTES:
+                    raise HTTPException(
+                        status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+                        detail=f"File exceeds the "
+                        f"{settings.MAX_UPLOAD_BYTES // (1024 * 1024)}MB limit.",
+                    )
+                out.write(block)
+
+            if written == 0:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST, detail="File is empty."
+                )
+
+            if ext not in _TEXTUAL:
+                _check_magic(ext, _header_of(destination))
+    except HTTPException:
+        os.remove(destination) if os.path.exists(destination) else None
+        raise
+    except Exception as exc:
+        if os.path.exists(destination):
+            os.remove(destination)
+        logger.error(f"Failed to store upload: {exc}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Could not store the upload."
+        )
+
+    if ext in _TEXTUAL:
+        try:
+            _check_text_decodable(destination)
+        except HTTPException:
+            os.remove(destination)
+            raise
+
+    return destination, written
+
+
+def _header_of(path: str) -> bytes:
+    with open(path, "rb") as fh:
+        return fh.read(8)
+
+
+def _check_text_decodable(path: str) -> None:
+    """Reject binary blobs masquerading as .txt/.csv/.md."""
+    with open(path, "rb") as fh:
+        sample = fh.read(4096)
+    if b"\x00" in sample:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="File appears to be binary, not text.",
+        )
+
+
+class DocumentSummary(BaseModel):
+    id: int
+    name: str
+    file_type: str
+    size_bytes: int
+    created_at: str
+
+
+@router.post("", status_code=status.HTTP_201_CREATED)
 async def upload_document(
     file: UploadFile = File(...),
     current_user: User = Depends(get_current_user),
-    db: Session = Depends(get_db)
-):
-    validate_file(file)
-    
-    # Generate unique filename on disk to prevent collisions
-    file_id = str(uuid.uuid4())
-    original_name = file.filename
-    ext = os.path.splitext(original_name)[1].lower()
-    stored_filename = f"{file_id}{ext}"
-    storage_path = os.path.join(settings.UPLOAD_DIR, stored_filename)
-    
-    # Save file to upload directory
-    try:
-        with open(storage_path, "wb") as f:
-            content = await file.read()
-            f.write(content)
-            file_size = len(content)
-    except Exception as e:
-        logger.error(f"Failed to save file: {e}")
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Failed to save uploaded file to disk."
-        )
-        
-    try:
-        # 1. Save document record to DB
-        new_doc = Document(
-            name=original_name,
-            type=ext.lstrip('.'),
-            size=file_size,
-            storage_path=storage_path,
-            uploaded_by=current_user.id
-        )
-        db.add(new_doc)
-        db.commit()
-        db.refresh(new_doc)
-        
-        # 2. Extract and Process document text into chunks
-        processed_chunks = DocumentProcessor.process_document(
-            file_path=storage_path,
-            file_name=original_name,
-            uploaded_by_email=current_user.email
-        )
-        
-        if not processed_chunks:
-            # Cleanup if no text could be extracted
-            db.delete(new_doc)
-            db.commit()
-            if os.path.exists(storage_path):
-                os.remove(storage_path)
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Could not extract readable text content from the document."
-            )
-            
-        # 3. Add chunks to database
-        db_chunks = []
-        chunk_texts = []
-        for chunk in processed_chunks:
-            db_chunk = DocumentChunk(
-                document_id=new_doc.id,
-                chunk_index=chunk["chunk_index"],
-                text=chunk["text"],
-                metadata_json=json.dumps(chunk["metadata"])
-            )
-            db_chunks.append(db_chunk)
-            chunk_texts.append(chunk["text"])
-            
-        db.add_all(db_chunks)
-        db.commit()
-        
-        # 4. Generate embeddings for the chunks
-        embeddings = EmbeddingManager.embed_documents(chunk_texts)
-        
-        # 5. Insert embeddings into Vector Store
-        vector_store = get_vector_store()
-        # Chroma/FAISS needs lists of dicts
-        vector_store_chunks = []
-        for i, chunk in enumerate(processed_chunks):
-            # Pass model schema
-            vector_store_chunks.append({
-                "chunk_index": chunk["chunk_index"],
-                "text": chunk["text"],
-                "metadata": chunk["metadata"]
-            })
-            
-        vector_store.add_chunks(
-            document_id=new_doc.id,
-            chunks=vector_store_chunks,
-            embeddings=embeddings
-        )
-        
-        logger.info(f"Successfully uploaded and indexed document: {original_name}")
-        return {
-            "message": "Document uploaded and indexed successfully",
-            "document_id": new_doc.id,
-            "filename": original_name,
-            "chunks_count": len(processed_chunks)
-        }
-        
-    except Exception as e:
-        logger.error(f"Error during document indexing: {e}")
-        # Rollback database changes
-        db.rollback()
-        # Clean up files
-        if os.path.exists(storage_path):
-            try:
-                os.remove(storage_path)
-            except Exception:
-                pass
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"An error occurred while indexing document: {str(e)}"
-        )
+    db: Session = Depends(get_db),
+) -> dict:
+    path, size = await _save_upload(file)
+    ext = os.path.splitext(path)[1].lower()
 
-@router.get("", response_model=List[dict])
-def get_documents(current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
-    # Non-admins can only see their own documents. Admins can see all.
-    if current_user.role == "admin":
-        docs = db.query(Document).all()
-    else:
-        docs = db.query(Document).filter(Document.uploaded_by == current_user.id).all()
-        
-    result = []
-    for d in docs:
-        result.append({
-            "id": d.id,
-            "name": d.name,
-            "type": d.type,
-            "size": d.size,
-            "created_at": d.created_at.isoformat(),
-            "uploaded_by": d.uploaded_by
-        })
-    return result
+    document = Document(
+        name=(file.filename or f"document{ext}")[:512],
+        file_type=ext.lstrip("."),
+        size_bytes=size,
+        storage_path=path,
+        owner_id=current_user.id,
+    )
+    db.add(document)
+    db.commit()
+    db.refresh(document)
+
+    try:
+        chunks = process_document(
+            path=path,
+            file_name=document.name,
+            owner_id=document.owner_id,
+        )
+    except DocumentProcessingError as exc:
+        _cleanup(document, db)
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+    except Exception as exc:
+        _cleanup(document, db)
+        logger.error(f"Processing failed for {document.name}: {exc}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Could not process the document.",
+        ) from exc
+
+    try:
+        for chunk in chunks:
+            db.add(
+                DocumentChunk(
+                    document_id=document.id,
+                    chunk_index=chunk["chunk_index"],
+                    text=chunk["text"],
+                    metadata_json=json.dumps(chunk["metadata"]),
+                )
+            )
+        db.commit()
+
+        embeddings = EmbeddingManager.embed_documents([c["text"] for c in chunks])
+        get_vector_store().upsert_chunks(document.id, chunks, embeddings)
+    except Exception as exc:
+        db.rollback()
+        _cleanup(document, db)
+        logger.error(f"Indexing failed for {document.name}: {exc}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Could not index the document.",
+        ) from exc
+
+    invalidate_retrieval_cache()
+    logger.info(f"{current_user.email} uploaded {document.name} ({len(chunks)} chunks)")
+    return {
+        "id": document.id,
+        "name": document.name,
+        "chunks": len(chunks),
+    }
+
+
+def _cleanup(document: Document, db: Session) -> None:
+    """Remove vectors, the file on disk, and the row. Never raises."""
+    try:
+        get_vector_store().delete_document(document.id)
+    except Exception:
+        logger.warning("Vector cleanup failed.", exc_info=True)
+    if os.path.exists(document.storage_path):
+        try:
+            os.remove(document.storage_path)
+        except OSError:
+            logger.warning("Could not remove %s", document.storage_path)
+    db.delete(document)
+    db.commit()
+
+
+@router.get("", response_model=List[DocumentSummary])
+def list_documents(
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> List[DocumentSummary]:
+    stmt = select(Document)
+    if current_user.role != "admin":
+        stmt = stmt.where(Document.owner_id == current_user.id)
+    documents = db.execute(stmt.order_by(Document.created_at.desc())).scalars().all()
+    return [
+        DocumentSummary(
+            id=d.id,
+            name=d.name,
+            file_type=d.file_type,
+            size_bytes=d.size_bytes,
+            created_at=d.created_at.isoformat(),
+        )
+        for d in documents
+    ]
+
 
 @router.delete("/{document_id}")
 def delete_document(
     document_id: int,
     current_user: User = Depends(get_current_user),
-    db: Session = Depends(get_db)
-):
-    # Retrieve document
-    doc = db.query(Document).filter(Document.id == document_id).first()
-    if not doc:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Document not found."
-        )
-        
-    # Check permissions
-    if current_user.role != "admin" and doc.uploaded_by != current_user.id:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="You do not have permission to delete this document."
-        )
-        
-    try:
-        # Delete from Vector Store
-        vector_store = get_vector_store()
-        vector_store.delete_document_chunks(document_id)
-        
-        # Delete file from disk
-        if os.path.exists(doc.storage_path):
-            os.remove(doc.storage_path)
-            
-        # Delete from database (cascades automatically to DocumentChunk table due to relationship cascade)
-        db.delete(doc)
-        db.commit()
-        
-        logger.info(f"Deleted document: {doc.name}")
-        return {"message": "Document deleted successfully."}
-    except Exception as e:
-        db.rollback()
-        logger.error(f"Failed to delete document: {e}")
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Failed to delete document: {e}"
-        )
+    db: Session = Depends(get_db),
+) -> dict:
+    document = db.get(Document, document_id)
+    if document is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Document not found.")
+    if not _can_access(current_user, document):
+        # 404 rather than 403 so the response does not confirm the document
+        # exists to someone who may not read it.
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Document not found.")
+
+    _cleanup(document, db)
+    invalidate_retrieval_cache()
+    logger.info(f"Deleted document {document_id}")
+    return {"deleted": document_id}
+
 
 @router.post("/{document_id}/reindex")
 def reindex_document(
     document_id: int,
     current_user: User = Depends(get_current_user),
-    db: Session = Depends(get_db)
-):
-    # Reindexing: delete vector representation, re-extract and re-embed.
-    doc = db.query(Document).filter(Document.id == document_id).first()
-    if not doc:
+    db: Session = Depends(get_db),
+) -> dict:
+    document = db.get(Document, document_id)
+    if document is None or not _can_access(current_user, document):
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Document not found.")
+
+    if not os.path.exists(document.storage_path):
         raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Document not found."
+            status_code=status.HTTP_410_GONE, detail="The stored file is missing."
         )
-        
-    # Permission check
-    if current_user.role != "admin" and doc.uploaded_by != current_user.id:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="You do not have permission to modify this document."
-        )
-        
+
     try:
-        # 1. Clean vector store
-        vector_store = get_vector_store()
-        vector_store.delete_document_chunks(document_id)
-        
-        # 2. Delete existing chunk rows in DB
-        db.query(DocumentChunk).filter(DocumentChunk.document_id == document_id).delete()
-        db.commit()
-        
-        # 3. Re-process document
-        processed_chunks = DocumentProcessor.process_document(
-            file_path=doc.storage_path,
-            file_name=doc.name,
-            uploaded_by_email=current_user.email
+        # owner_id, not current_user.id: an admin reindexing someone else's
+        # document must preserve the original owner, or the chunks would become
+        # visible to the admin and invisible to their owner.
+        chunks = process_document(
+            path=document.storage_path,
+            file_name=document.name,
+            owner_id=document.owner_id,
         )
-        
-        # 4. Insert chunks to DB
-        db_chunks = []
-        chunk_texts = []
-        for chunk in processed_chunks:
-            db_chunk = DocumentChunk(
-                document_id=doc.id,
-                chunk_index=chunk["chunk_index"],
-                text=chunk["text"],
-                metadata_json=json.dumps(chunk["metadata"])
+
+        db.execute(
+            DocumentChunk.__table__.delete().where(DocumentChunk.document_id == document.id)
+        )
+        db.commit()
+
+        for chunk in chunks:
+            db.add(
+                DocumentChunk(
+                    document_id=document.id,
+                    chunk_index=chunk["chunk_index"],
+                    text=chunk["text"],
+                    metadata_json=json.dumps(chunk["metadata"]),
+                )
             )
-            db_chunks.append(db_chunk)
-            chunk_texts.append(chunk["text"])
-            
-        db.add_all(db_chunks)
         db.commit()
-        
-        # 5. Embed
-        embeddings = EmbeddingManager.embed_documents(chunk_texts)
-        
-        # 6. Insert to Vector DB
-        vector_store_chunks = []
-        for i, chunk in enumerate(processed_chunks):
-            vector_store_chunks.append({
-                "chunk_index": chunk["chunk_index"],
-                "text": chunk["text"],
-                "metadata": chunk["metadata"]
-            })
-            
-        vector_store.add_chunks(
-            document_id=doc.id,
-            chunks=vector_store_chunks,
-            embeddings=embeddings
-        )
-        
-        logger.info(f"Re-indexed document: {doc.name}")
-        return {"message": "Document re-indexed successfully", "chunks_count": len(processed_chunks)}
-    except Exception as e:
+
+        embeddings = EmbeddingManager.embed_documents([c["text"] for c in chunks])
+        get_vector_store().upsert_chunks(document.id, chunks, embeddings)
+    except DocumentProcessingError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+    except Exception as exc:
         db.rollback()
-        logger.error(f"Re-indexing failed: {e}")
+        logger.error(f"Reindex failed for document {document_id}: {exc}")
         raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Re-indexing failed: {e}"
-        )
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Reindexing failed."
+        ) from exc
+
+    invalidate_retrieval_cache()
+    return {"id": document.id, "chunks": len(chunks)}
