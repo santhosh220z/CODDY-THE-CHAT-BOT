@@ -1,238 +1,279 @@
+from __future__ import annotations
+
 import os
-import json
 import pickle
-import numpy as np
+import threading
 from abc import ABC, abstractmethod
-from typing import List, Dict, Any, Tuple
-import chromadb
-import faiss
+from typing import Any, Dict, List, Optional
+
+import numpy as np
+
 from backend.utils.config import settings
 from backend.utils.logging import logger
 
+
 class BaseVectorStore(ABC):
-    @abstractmethod
-    def add_chunks(self, document_id: int, chunks: List[Dict[str, Any]], embeddings: List[List[float]]):
-        """Add document chunks and their embeddings to the vector store."""
-        pass
+    """Vector index for document chunks.
+
+    `search` takes a required `user_id`. It is deliberately not an optional
+    filter dict: a filter with a default is a filter that eventually gets
+    omitted, and omitting it here returns every user's content to anyone who
+    asks. Passing the tenant explicitly means the unrestricted case has to be
+    spelled out as `None`.
+    """
 
     @abstractmethod
-    def search(self, query_embedding: List[float], top_k: int = 5) -> List[Dict[str, Any]]:
-        """Search the vector store for similar chunks. Returns list of chunk metadata and text."""
-        pass
+    def upsert_chunks(
+        self, document_id: int, chunks: List[Dict[str, Any]], embeddings: List[List[float]]
+    ) -> None:
+        ...
 
     @abstractmethod
-    def delete_document_chunks(self, document_id: int):
-        """Delete all chunks related to a document ID from the store."""
-        pass
+    def search(
+        self, query_embedding: List[float], top_k: int, user_id: Optional[int]
+    ) -> List[Dict[str, Any]]:
+        """Return at most `top_k` chunks owned by `user_id`, best first.
+
+        `user_id=None` means unrestricted (administrators).
+        """
+
+    @abstractmethod
+    def delete_document(self, document_id: int) -> None:
+        ...
+
+
+def _visible_to(metadata: Dict[str, Any], user_id: Optional[int]) -> bool:
+    """Tenant predicate. Chunks missing user_id are never visible."""
+    if user_id is None:
+        return "user_id" in metadata
+    return metadata.get("user_id") == user_id
+
 
 class ChromaVectorStore(BaseVectorStore):
-    def __init__(self):
+    COLLECTION = "coddy_chunks"
+    COLLECTION_METADATA = {"hnsw:space": "cosine"}
+
+    def __init__(self) -> None:
+        import chromadb
+
+        self._lock = threading.Lock()
         self.client = chromadb.PersistentClient(path=settings.CHROMA_DB_PATH)
-        # Create or get collection
         self.collection = self.client.get_or_create_collection(
-            name="coddy_chunks",
-            metadata={"hnsw:space": "cosine"} # Use Cosine similarity
+            name=self.COLLECTION, metadata=self.COLLECTION_METADATA
         )
-        logger.info(f"Initialized ChromaDB vector store at: {settings.CHROMA_DB_PATH}")
+        # get_or_create_collection ignores `metadata` for an existing
+        # collection. A mismatched space silently produces wrong distances.
+        existing = self.collection.metadata or {}
+        drift = {
+            k: (existing.get(k), v)
+            for k, v in self.COLLECTION_METADATA.items()
+            if existing.get(k) != v
+        }
+        if drift:
+            logger.warning(
+                f"Chroma collection '{self.COLLECTION}' metadata drift {drift} "
+                f"(found, expected). Scores may be wrong. Delete "
+                f"{settings.CHROMA_DB_PATH} and re-upload your documents."
+            )
+        logger.info(f"Chroma store ready at {settings.CHROMA_DB_PATH}")
 
-    def add_chunks(self, document_id: int, chunks: List[Dict[str, Any]], embeddings: List[List[float]]):
-        ids = [str(c["chunk_index"]) + "_" + str(document_id) for c in chunks]
-        documents = [c["text"] for c in chunks]
-        
-        # Flatten metadata dict for Chroma (Chroma accepts string, int, float, bool)
-        metadatas = []
-        for c in chunks:
-            meta = c["metadata"].copy()
-            meta["document_id"] = document_id
-            metadatas.append(meta)
-            
-        self.collection.add(
-            ids=ids,
-            embeddings=embeddings,
-            documents=documents,
-            metadatas=metadatas
-        )
-        logger.info(f"Added {len(chunks)} chunks for document ID {document_id} to ChromaDB.")
-
-    def search(self, query_embedding: List[float], top_k: int = 5) -> List[Dict[str, Any]]:
-        results = self.collection.query(
-            query_embeddings=[query_embedding],
-            n_results=top_k
-        )
-        
-        formatted_results = []
-        if results and results["documents"] and len(results["documents"]) > 0:
-            docs = results["documents"][0]
-            metas = results["metadatas"][0]
-            distances = results["distances"][0] if "distances" in results else [0.0] * len(docs)
-            ids = results["ids"][0]
-            
-            for i in range(len(docs)):
-                formatted_results.append({
-                    "id": ids[i],
-                    "text": docs[i],
-                    "metadata": metas[i],
-                    "score": 1.0 - distances[i] # Chroma returns distance. Cosine distance -> cosine similarity
-                })
-        return formatted_results
-
-    def delete_document_chunks(self, document_id: int):
-        # Delete using metadata filter
-        self.collection.delete(
-            where={"document_id": document_id}
-        )
-        logger.info(f"Deleted chunks for document ID {document_id} from ChromaDB.")
-
-
-class FAISSVectorStore(BaseVectorStore):
-    def __init__(self):
-        self.index_file = os.path.join(settings.FAISS_DB_PATH, "faiss_index.bin")
-        self.meta_file = os.path.join(settings.FAISS_DB_PATH, "faiss_metadata.pkl")
-        
-        os.makedirs(settings.FAISS_DB_PATH, exist_ok=True)
-        
-        self.dimension = 384 # Default dimension for all-MiniLM-L6-v2. Adjusts dynamically if needed.
-        self.index = None
-        self.metadata_store: List[Dict[str, Any]] = [] # Index matches with row in FAISS index
-        
-        self._load_index()
-        logger.info(f"Initialized FAISS vector store at: {settings.FAISS_DB_PATH}")
-
-    def _load_index(self):
-        if os.path.exists(self.index_file) and os.path.exists(self.meta_file):
-            try:
-                self.index = faiss.read_index(self.index_file)
-                with open(self.meta_file, "rb") as f:
-                    self.metadata_store = pickle.load(f)
-                self.dimension = self.index.d
-                logger.info(f"Loaded existing FAISS index with {len(self.metadata_store)} records.")
-            except Exception as e:
-                logger.error(f"Failed to load FAISS index: {e}. Recreating...")
-                self._create_empty_index()
-        else:
-            self._create_empty_index()
-
-    def _create_empty_index(self):
-        # We use IndexFlatIP with normalized vectors for Cosine Similarity
-        self.index = faiss.IndexFlatIP(self.dimension)
-        self.metadata_store = []
-        self._save_index()
-
-    def _save_index(self):
-        try:
-            faiss.write_index(self.index, self.index_file)
-            with open(self.meta_file, "wb") as f:
-                pickle.dump(self.metadata_store, f)
-        except Exception as e:
-            logger.error(f"Error saving FAISS store: {e}")
-
-    def add_chunks(self, document_id: int, chunks: List[Dict[str, Any]], embeddings: List[List[float]]):
+    def upsert_chunks(
+        self, document_id: int, chunks: List[Dict[str, Any]], embeddings: List[List[float]]
+    ) -> None:
         if not chunks:
             return
-            
-        emb_np = np.array(embeddings).astype("float32")
-        # Ensure dimensionality matches
-        if self.index is None or self.index.ntotal == 0:
-            self.dimension = emb_np.shape[1]
-            self.index = faiss.IndexFlatIP(self.dimension)
-            
-        # Normalize vectors for Cosine Similarity (Inner Product of L2 normalized vectors)
-        faiss.normalize_L2(emb_np)
-        
-        self.index.add(emb_np)
-        
-        # Add metadata mapping
-        for i, c in enumerate(chunks):
-            meta = c["metadata"].copy()
-            meta["document_id"] = document_id
-            self.metadata_store.append({
-                "id": f"{c['chunk_index']}_{document_id}",
-                "text": c["text"],
-                "metadata": meta
-            })
-            
-        self._save_index()
-        logger.info(f"Added {len(chunks)} chunks for document ID {document_id} to FAISS.")
+        ids = [f"{c['chunk_index']}_{document_id}" for c in chunks]
+        metadatas = []
+        for chunk in chunks:
+            meta = {k: v for k, v in chunk["metadata"].items() if v is not None}
+            meta["document_id"] = int(document_id)
+            metadatas.append(meta)
 
-    def search(self, query_embedding: List[float], top_k: int = 5) -> List[Dict[str, Any]]:
-        if self.index is None or self.index.ntotal == 0:
+        with self._lock:
+            # upsert, not add: `add` raises on duplicate ids, which broke
+            # reindex whenever the preceding delete had not fully landed.
+            self.collection.upsert(
+                ids=ids,
+                embeddings=embeddings,
+                documents=[c["text"] for c in chunks],
+                metadatas=metadatas,
+            )
+        logger.info(f"Upserted {len(chunks)} chunks for document {document_id}")
+
+    def search(
+        self, query_embedding: List[float], top_k: int, user_id: Optional[int]
+    ) -> List[Dict[str, Any]]:
+        where = None if user_id is None else {"user_id": int(user_id)}
+        result = self.collection.query(
+            query_embeddings=[query_embedding], n_results=top_k, where=where
+        )
+        if not result or not result.get("documents") or not result["documents"][0]:
             return []
-            
-        q_np = np.array([query_embedding]).astype("float32")
-        faiss.normalize_L2(q_np)
-        
-        k = min(top_k, self.index.ntotal)
-        scores, indices = self.index.search(q_np, k)
-        
-        results = []
-        for score, idx in zip(scores[0], indices[0]):
-            if idx < 0 or idx >= len(self.metadata_store):
-                continue
-            item = self.metadata_store[idx]
-            results.append({
-                "id": item["id"],
-                "text": item["text"],
-                "metadata": item["metadata"],
-                "score": float(score) # Cosine similarity score
-            })
-        return results
 
-    def delete_document_chunks(self, document_id: int):
-        if self.index is None or self.index.ntotal == 0:
+        docs = result["documents"][0]
+        metas = result["metadatas"][0]
+        dists = result.get("distances", [[0.0] * len(docs)])[0]
+        ids = result["ids"][0]
+
+        # Re-check locally: never trust the backend to have honoured the filter.
+        out = []
+        for i in range(len(docs)):
+            metadata = metas[i] or {}
+            if _visible_to(metadata, user_id):
+                out.append(
+                    {
+                        "id": ids[i],
+                        "text": docs[i],
+                        "metadata": metadata,
+                        "score": 1.0 - dists[i],
+                    }
+                )
+        return out
+
+    def delete_document(self, document_id: int) -> None:
+        with self._lock:
+            self.collection.delete(where={"document_id": int(document_id)})
+        logger.info(f"Removed vectors for document {document_id}")
+
+
+class FaissVectorStore(BaseVectorStore):
+    """Flat inner-product index over L2-normalised vectors (cosine).
+
+    IndexFlatIP scans everything anyway, so filtering after the scan is cheap.
+    """
+
+    def __init__(self) -> None:
+        import faiss
+
+        os.makedirs(settings.FAISS_DB_PATH, exist_ok=True)
+        self._index_file = os.path.join(settings.FAISS_DB_PATH, "index.faiss")
+        self._meta_file = os.path.join(settings.FAISS_DB_PATH, "index_meta.pkl")
+        self._lock = threading.Lock()
+        self.dimension = 0
+        self._index = None
+        self._records: List[Dict[str, Any]] = []
+        self._faiss = faiss
+        self._load()
+
+    def _load(self) -> None:
+        if os.path.exists(self._index_file) and os.path.exists(self._meta_file):
+            try:
+                with open(self._meta_file, "rb") as fh:
+                    self._records = pickle.load(fh)
+                self._index = self._faiss.read_index(self._index_file)
+                self.dimension = self._index.d
+                logger.info(f"FAISS store loaded: {len(self._records)} vectors")
+                return
+            except Exception as exc:
+                logger.error(f"FAISS index unreadable, rebuilding empty: {exc}")
+        self._records = []
+        self._index = self._faiss.IndexFlatIP(0)
+        self.dimension = 0
+
+    def _persist(self) -> None:
+        os.makedirs(settings.FAISS_DB_PATH, exist_ok=True)
+        self._faiss.write_index(self._index, self._index_file)
+        with open(self._meta_file, "wb") as fh:
+            pickle.dump(self._records, fh)
+
+    def upsert_chunks(
+        self, document_id: int, chunks: List[Dict[str, Any]], embeddings: List[List[float]]
+    ) -> None:
+        if not chunks:
             return
-            
-        # FAISS doesn't support easy dynamic deletion in IndexFlatIP without recreating,
-        # so we filter out metadata and rebuild the index for consistency.
-        new_metadata_store = []
-        keep_indices = []
-        
-        # We need to extract all vectors we want to keep
-        vectors_to_keep = []
-        for idx, item in enumerate(self.metadata_store):
-            if item["metadata"].get("document_id") != document_id:
-                new_metadata_store.append(item)
-                keep_indices.append(idx)
-        
-        if len(new_metadata_store) == 0:
-            self._create_empty_index()
+
+        vectors = np.asarray(embeddings, dtype="float32")
+        self._faiss.normalize_L2(vectors)
+
+        with self._lock:
+            # Drop any prior copy of this document so ids stay unique.
+            self.delete_document(document_id)
+
+            if self._index.ntotal == 0:
+                self.dimension = vectors.shape[1]
+                self._index = self._faiss.IndexFlatIP(self.dimension)
+
+            self._index.add(vectors)
+            for i, chunk in enumerate(chunks):
+                meta = {k: v for k, v in chunk["metadata"].items() if v is not None}
+                meta["document_id"] = int(document_id)
+                self._records.append(
+                    {
+                        "id": f"{chunk['chunk_index']}_{document_id}",
+                        "text": chunk["text"],
+                        "metadata": meta,
+                    }
+                )
+            self._persist()
+        logger.info(f"Upserted {len(chunks)} chunks for document {document_id}")
+
+    def search(
+        self, query_embedding: List[float], top_k: int, user_id: Optional[int]
+    ) -> List[Dict[str, Any]]:
+        with self._lock:
+            if self._index is None or self._index.ntotal == 0:
+                return []
+            query = np.asarray([query_embedding], dtype="float32")
+            self._faiss.normalize_L2(query)
+            # Full scan, then filter, so we can still return top_k hits.
+            scores, indices = self._index.search(query, self._index.ntotal)
+            results: List[Dict[str, Any]] = []
+            for score, idx in zip(scores[0], indices[0]):
+                if idx < 0 or idx >= len(self._records):
+                    continue
+                record = self._records[idx]
+                if _visible_to(record["metadata"], user_id):
+                    results.append(
+                        {
+                            "id": record["id"],
+                            "text": record["text"],
+                            "metadata": record["metadata"],
+                            "score": float(score),
+                        }
+                    )
+                    if len(results) >= top_k:
+                        break
+            return results
+
+    def delete_document(self, document_id: int) -> None:
+        if self._index is None or self._index.ntotal == 0:
             return
-            
-        # Extract vectors using FAISS helper or rebuild from original embeddings (which requires storing them).
-        # Since rebuilding from memory is easier, let's extract vectors from the old index.
-        # IndexFlatIP allows extracting vectors by ID or reconstruct.
-        reconstructed_vectors = []
-        for idx in keep_indices:
-            vec = self.index.reconstruct(idx)
-            reconstructed_vectors.append(vec)
-            
-        # Create new index and write
-        self.index = faiss.IndexFlatIP(self.dimension)
-        if reconstructed_vectors:
-            vectors_np = np.array(reconstructed_vectors).astype("float32")
-            # Re-normalize just to be sure
-            faiss.normalize_L2(vectors_np)
-            self.index.add(vectors_np)
-            
-        self.metadata_store = new_metadata_store
-        self._save_index()
-        logger.info(f"Deleted chunks for document ID {document_id} from FAISS. Index rebuilt.")
+
+        keep = [i for i, r in enumerate(self._records) if r["metadata"].get("document_id") != int(document_id)]
+        removed = len(self._records) - len(keep)
+        if removed == 0:
+            return
+
+        if keep:
+            vectors = np.vstack([self._index.reconstruct(i) for i in keep]).astype("float32")
+            self._faiss.normalize_L2(vectors)
+            self._index = self._faiss.IndexFlatIP(vectors.shape[1])
+            self._index.add(vectors)
+            self._records = [self._records[i] for i in keep]
+        else:
+            self._records = []
+            self._index = self._faiss.IndexFlatIP(self.dimension or 1)
+
+        self._persist()
+        logger.info(f"Removed {removed} vectors for document {document_id}")
 
 
-# Factory mapping
-_store_instance = None
+_store: Optional[BaseVectorStore] = None
+_store_lock = threading.Lock()
+
 
 def get_vector_store() -> BaseVectorStore:
-    global _store_instance
-    if _store_instance is not None:
-        return _store_instance
-        
-    store_type = settings.VECTOR_STORE_TYPE.lower()
-    if store_type == "chroma":
-        _store_instance = ChromaVectorStore()
-    elif store_type == "faiss":
-        _store_instance = FAISSVectorStore()
-    else:
-        logger.warning(f"Unknown vector store type: '{store_type}'. Defaulting to ChromaDB.")
-        _store_instance = ChromaVectorStore()
-        
-    return _store_instance
+    """Process-wide singleton. Loading an index on every request is wasteful."""
+    global _store
+    if _store is None:
+        with _store_lock:
+            if _store is None:
+                _store = ChromaVectorStore() if settings.VECTOR_STORE_TYPE == "chroma" else FaissVectorStore()
+    return _store
+
+
+def reset_vector_store() -> None:
+    """Test hook: drop the cached instance."""
+    global _store
+    with _store_lock:
+        _store = None
