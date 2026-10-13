@@ -1,23 +1,50 @@
-fastapi
-uvicorn
-sqlalchemy
-psycopg2-binary
-pydantic
-pydantic-settings
-python-jose[cryptography]
-passlib[bcrypt]
-python-multipart
-pypdf
-pdfplumber
-python-docx
-pandas
-chromadb
-faiss-cpu
-sentence-transformers
-rank-bm25
-requests
-numpy
-pytest
-httpx
-jinja2
-bcrypt
+# Pinned with compatible-release ranges: patch/minor security fixes still
+# resolve, majors cannot break the app unnoticed.
+
+# --- Web framework -------------------------------------------------------
+fastapi>=0.115,<1.0
+uvicorn[standard]>=0.30,<1.0
+python-multipart>=0.0.9
+
+# --- Data ----------------------------------------------------------------
+sqlalchemy>=2.0,<3.0
+# SQLite is bundled with Python. Uncomment for Postgres:
+# psycopg2-binary>=2.9,<3.0
+
+# --- Config / validation -------------------------------------------------
+pydantic>=2.7,<3.0
+pydantic-settings>=2.3,<3.0
+# Required by pydantic.EmailStr. Without it the auth schemas fail to build.
+email-validator>=2.2
+
+# --- Security ------------------------------------------------------------
+# bcrypt is used directly. passlib is unmaintained (last release 2020) and
+# breaks against modern bcrypt.
+bcrypt>=4.1
+python-jose[cryptography]>=3.3
+
+# --- Local model inference ----------------------------------------------
+# torch needs the CUDA index for NVIDIA GPUs:
+#   pip install torch --index-url https://download.pytorch.org/whl/cu124
+# then:
+transformers>=4.51,<5.0
+accelerate>=0.34,<2.0
+bitsandbytes>=0.45
+# Inference falls back to Ollama if you set LLM_PROVIDER=ollama
+requests>=2.32
+
+# --- Document parsing ----------------------------------------------------
+pypdf>=4.2
+python-docx>=1.1
+# pandas is only needed for .csv extraction.
+pandas>=2.2
+
+# --- Retrieval -----------------------------------------------------------
+chromadb>=0.5
+sentence-transformers>=3.0
+rank-bm25>=0.2.2
+numpy>=1.26
+
+# --- Testing -------------------------------------------------------------
+pytest>=8.0
+httpx>=0.27
