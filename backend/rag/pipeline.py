@@ -1,231 +1,325 @@
-import json
-from typing import List, Dict, Any, Generator, Tuple
-from sqlalchemy.orm import Session
-from rank_bm25 import BM25Okapi
+from __future__ import annotations
 
-from backend.utils.config import settings
-from backend.utils.logging import logger
-from backend.models.models import DocumentChunk, ChatMessage, Document
+import json
+import threading
+from collections import OrderedDict
+from typing import Any, Dict, Generator, List, Optional, Sequence, Set, Tuple
+
+from rank_bm25 import BM25Okapi
+from sqlalchemy import select
+from sqlalchemy.orm import Session
+
+from backend.models.models import ChatMessage, Document, DocumentChunk, User
 from backend.rag.embeddings import EmbeddingManager
 from backend.rag.vector_store import get_vector_store
-from backend.services.llm import get_llm_provider
+from backend.utils.config import settings
+from backend.utils.logging import logger
+
+# How many recent turns are replayed to the model.
+HISTORY_MESSAGES = 10
+
+# ---------------------------------------------------------------------------
+# BM25 cache
+#
+# Rebuilding the index over every chunk on every question is O(total corpus
+# tokens) per query. The corpus only changes when a document is added, removed
+# or reindexed, so we build once per (revision, scope) and reuse it.
+# ---------------------------------------------------------------------------
+_cache: "OrderedDict[Tuple[int, int], Dict[str, Any]]" = OrderedDict()
+_CACHE_MAX = 4
+_revision = 0
+_lock = threading.Lock()
+
+
+def invalidate_retrieval_cache() -> None:
+    """Call after any write that changes the searchable corpus."""
+    global _revision
+    with _lock:
+        _revision += 1
+
+
+def accessible_document_ids(db: Session, user: User) -> Optional[Set[int]]:
+    """Which documents this user may retrieve from.
+
+    None means unrestricted (admin). This is the single definition of
+    visibility; the vector store and BM25 both derive from it so the two
+    retrieval paths cannot drift apart and disagree about who can see what.
+    """
+    if user.role == "admin":
+        return None
+    rows = db.execute(select(Document.id).where(Document.owner_id == user.id)).all()
+    return {row[0] for row in rows}
+
+
+def _scope_filter(db: Session, user: User) -> Tuple[Optional[Set[int]], Optional[int]]:
+    """(document id set, vector-store tenant) for this user.
+
+    The tenant is None for admins, which the vector store treats as
+    "unrestricted". Keeping it as a single Optional[int] means both backends
+    receive the same signal instead of two differently-shaped filter dialects.
+    """
+    doc_ids = accessible_document_ids(db, user)
+    return doc_ids, (None if doc_ids is None else user.id)
+
+
+def _bm25_entry(db: Session, doc_ids: Optional[Set[int]], scope_key: int) -> Dict[str, Any]:
+    """BM25 index over one visibility scope, built once per revision."""
+    key = (_revision, scope_key)
+    with _lock:
+        hit = _cache.get(key)
+        if hit is not None:
+            _cache.move_to_end(key)
+            return hit
+
+    stmt = select(DocumentChunk)
+    if doc_ids is not None:
+        if not doc_ids:
+            entry: Dict[str, Any] = {"index": None, "chunks": []}
+            with _lock:
+                _cache[key] = entry
+            return entry
+        stmt = stmt.where(DocumentChunk.document_id.in_(doc_ids))
+
+    rows = db.execute(stmt).scalars().all()
+
+    # One bulk fetch for names instead of a query per chunk.
+    names = {
+        row[0]: row[1]
+        for row in db.execute(select(Document.id, Document.name)).all()
+    }
+
+    chunks: List[Dict[str, Any]] = []
+    for row in rows:
+        file_name = names.get(row.document_id, "unknown")
+        try:
+            metadata = json.loads(row.metadata_json or "{}")
+        except (TypeError, ValueError):
+            metadata = {}
+        if not isinstance(metadata, dict):
+            metadata = {}
+        metadata.setdefault("file_name", file_name)
+        metadata.setdefault("page_number", 1)
+
+        chunks.append(
+            {
+                "id": f"{row.chunk_index}_{row.document_id}",
+                "text": row.text,
+                "metadata": metadata,
+            }
+        )
+
+    index = None
+    if chunks:
+        try:
+            corpus = [[t for t in c["text"].lower().split() if t] for c in chunks]
+            index = BM25Okapi(corpus)
+        except Exception as exc:
+            logger.error(f"BM25 index could not be built: {exc}")
+
+    entry = {"index": index, "chunks": chunks}
+    with _lock:
+        _cache[key] = entry
+        _cache.move_to_end(key)
+        while len(_cache) > _CACHE_MAX:
+            _cache.popitem(last=False)
+    return entry
+
+
+def _min_max(scores: Sequence[float]) -> List[float]:
+    if not scores:
+        return []
+    lo, hi = min(scores), max(scores)
+    span = (hi - lo) or 1.0
+    return [(s - lo) / span for s in scores]
+
 
 class RagPipeline:
-    @staticmethod
-    def _tokenize(text: str) -> List[str]:
-        # Simple lowercase word tokenizer
-        return text.lower().split()
+    """Retrieval and prompt assembly."""
 
+    # ------------------------------------------------------------------
+    # Retrieval
+    # ------------------------------------------------------------------
     @classmethod
-    def hybrid_search(cls, query: str, db: Session, limit: int = 5) -> List[Dict[str, Any]]:
-        vector_store = get_vector_store()
-        query_embedding = EmbeddingManager.embed_query(query)
-        
-        # 1. Get vector search results (retrieve a bit more than limit for reranking/fusion)
-        vector_results = vector_store.search(query_embedding, top_k=limit * 3)
-        
+    def retrieve(cls, query: str, db: Session, user: User, limit: Optional[int] = None) -> List[Dict[str, Any]]:
+        limit = limit or settings.RAG_TOP_K
+        doc_ids, tenant = _scope_filter(db, user)
+
+        # Over-fetch so a filtered backend can still return `limit` real hits.
+        fetch = max(limit, limit * 3)
+
+        vector_hits = get_vector_store().search(
+            EmbeddingManager.embed_query(query), top_k=fetch, user_id=tenant
+        )
+
         if not settings.HYBRID_SEARCH:
-            return vector_results[:limit]
-            
-        # 2. Get all document chunks from database to build BM25 index
-        # For performance in large systems, we can pre-filter or cache this. For this system, we query dynamically.
-        db_chunks = db.query(DocumentChunk).all()
-        if not db_chunks:
-            return vector_results[:limit]
-            
-        corpus = [c.text for c in db_chunks]
-        tokenized_corpus = [cls._tokenize(doc) for doc in corpus]
-        
-        try:
-            bm25 = BM25Okapi(tokenized_corpus)
-            tokenized_query = cls._tokenize(query)
-            bm25_scores = bm25.get_scores(tokenized_query)
-            
-            # Pair each chunk with its BM25 score
-            bm25_results = []
-            for i, chunk in enumerate(db_chunks):
-                # Retrieve document metadata to populate source info
-                doc = db.query(Document).filter(Document.id == chunk.document_id).first()
-                file_name = doc.name if doc else "Unknown"
-                
-                # Decode metadata if stored as JSON
-                metadata = {}
-                try:
-                    metadata = json.loads(chunk.metadata_json)
-                except Exception:
-                    metadata = {
-                        "file_name": file_name,
-                        "page_number": 1,
-                        "source": file_name
-                    }
-                    
-                bm25_results.append({
-                    "id": f"{chunk.chunk_index}_{chunk.document_id}",
-                    "text": chunk.text,
-                    "metadata": metadata,
-                    "score": float(bm25_scores[i])
-                })
-                
-            # Sort and take top bm25 hits
-            bm25_results = sorted(bm25_results, key=lambda x: x["score"], reverse=True)[:limit * 3]
-        except Exception as e:
-            logger.error(f"BM25 initialization failed: {e}")
-            return vector_results[:limit]
-            
-        # 3. Hybrid fusion (weighted normalized sum)
-        # Normalize vector scores
-        v_scores = [r["score"] for r in vector_results]
-        v_min, v_max = min(v_scores) if v_scores else 0, max(v_scores) if v_scores else 1
-        v_range = (v_max - v_min) if (v_max - v_min) > 0 else 1
-        
-        for r in vector_results:
-            r["norm_score"] = (r["score"] - v_min) / v_range
-            
-        # Normalize BM25 scores
-        b_scores = [r["score"] for r in bm25_results]
-        b_min, b_max = min(b_scores) if b_scores else 0, max(b_scores) if b_scores else 1
-        b_range = (b_max - b_min) if (b_max - b_min) > 0 else 1
-        
-        for r in bm25_results:
-            r["norm_score"] = (r["score"] - b_min) / b_range
-            
-        # Merge results by ID
-        merged = {}
+            return vector_hits[:limit]
+
+        scope_key = 0 if doc_ids is None else user.id
+        entry = _bm25_entry(db, doc_ids, scope_key)
+        if entry["index"] is None:
+            return vector_hits[:limit]
+
+        scores = entry["index"].get_scores([t for t in query.lower().split() if t])
+        bm25_hits = []
+        for i, chunk in enumerate(entry["chunks"]):
+            bm25_hits.append(
+                {
+                    "id": chunk["id"],
+                    "text": chunk["text"],
+                    "metadata": chunk["metadata"],
+                    "score": float(scores[i]),
+                }
+            )
+        bm25_hits.sort(key=lambda h: h["score"], reverse=True)
+        bm25_hits = bm25_hits[:fetch]
+
         bm25_weight = settings.BM25_WEIGHT
         vector_weight = 1.0 - bm25_weight
-        
-        # Populate from vector results
-        for r in vector_results:
-            merged[r["id"]] = {
-                "text": r["text"],
-                "metadata": r["metadata"],
-                "score": r["norm_score"] * vector_weight
+
+        for hit, norm in zip(vector_hits, _min_max([h["score"] for h in vector_hits])):
+            hit["norm"] = norm * vector_weight
+        for hit, norm in zip(bm25_hits, _min_max([h["score"] for h in bm25_hits])):
+            hit["norm"] = norm * bm25_weight
+
+        # Weighted sum of min-max normalised scores. This is not Reciprocal
+        # Rank Fusion; the README previously claimed it was.
+        merged: Dict[str, Dict[str, Any]] = {}
+        for hit in vector_hits:
+            merged[hit["id"]] = {
+                "text": hit["text"],
+                "metadata": hit["metadata"],
+                "score": hit["norm"],
             }
-            
-        # Add or combine BM25 results
-        for r in bm25_results:
-            if r["id"] in merged:
-                merged[r["id"]]["score"] += r["norm_score"] * bm25_weight
+        for hit in bm25_hits:
+            if hit["id"] in merged:
+                merged[hit["id"]]["score"] += hit["norm"]
             else:
-                merged[r["id"]] = {
-                    "text": r["text"],
-                    "metadata": r["metadata"],
-                    "score": r["norm_score"] * bm25_weight
+                merged[hit["id"]] = {
+                    "text": hit["text"],
+                    "metadata": hit["metadata"],
+                    "score": hit["norm"],
                 }
-                
-        # Sort merged dict items by score descending
-        sorted_merged = sorted(
-            [{"id": k, **v} for k, v in merged.items()],
-            key=lambda x: x["score"],
-            reverse=True
+
+        ranked = sorted(
+            ({"id": k, **v} for k, v in merged.items()),
+            key=lambda item: item["score"],
+            reverse=True,
         )
-        
-        return sorted_merged[:limit]
+        return ranked[:limit]
 
+    # ------------------------------------------------------------------
+    # Prompt assembly
+    # ------------------------------------------------------------------
     @classmethod
-    def retrieve_relevant_chunks(cls, query: str, db: Session, limit: int = 5) -> List[Dict[str, Any]]:
-        try:
-            return cls.hybrid_search(query, db, limit=limit)
-        except Exception as e:
-            logger.error(f"Error during context retrieval: {e}")
-            return []
+    def recent_history(cls, db: Session, session_id: str) -> List[ChatMessage]:
+        """The LAST N messages, oldest first.
 
-    @classmethod
-    def query(cls, query: str, session_id: str, db: Session) -> Dict[str, Any]:
-        """Non-streaming query method."""
-        llm = get_llm_provider()
-        
-        # 1. Retrieve history (last 10 messages)
-        history = db.query(ChatMessage)\
-            .filter(ChatMessage.session_id == session_id)\
-            .order_by(ChatMessage.created_at.asc())\
-            .limit(10)\
+        Ordering ascending and then taking N returns the oldest messages, so a
+        long conversation loses the part that matters. The previous
+        implementation did exactly that.
+        """
+        rows = (
+            db.execute(
+                select(ChatMessage)
+                .where(ChatMessage.session_id == session_id)
+                .order_by(ChatMessage.created_at.desc(), ChatMessage.id.desc())
+                .limit(HISTORY_MESSAGES)
+            )
+            .scalars()
             .all()
-            
-        # 2. Retrieve chunks
-        chunks = cls.retrieve_relevant_chunks(query, db, limit=settings.RAG_TOP_K)
-        
-        # 3. Format inputs
-        history_str = "\n".join([f"{m.sender.capitalize()}: {m.content}" for m in history])
-        context_str = "\n\n".join([f"Source: {c['metadata'].get('file_name')} (Page {c['metadata'].get('page_number')})\nContent: {c['text']}" for c in chunks])
-        
-        # 4. Prompt construction
-        system_prompt = (
-            "You are CODDY – THE CHAT BOT.\n"
-            "Answer only using the provided context.\n"
-            "If the answer is not found in the context, respond with:\n"
-            "\"I couldn't find that information in the knowledge base.\""
         )
-        
-        prompt = ""
-        if history_str:
-            prompt += f"Conversation History:\n{history_str}\n\n"
-            
-        prompt += f"Context:\n{context_str}\n\nQuestion:\n{query}\n\nAnswer:"
-        
-        # 5. LLM Call
-        response = llm.generate(prompt, system_prompt=system_prompt)
-        
-        # 6. Citations formatted
+        return list(reversed(rows))
+
+    @staticmethod
+    def build_prompt(
+        query: str, history: Sequence[ChatMessage], chunks: Sequence[Dict[str, Any]]
+    ) -> Tuple[str, str]:
+        system = (
+            "You are CODDY, a retrieval-augmented assistant. Answer strictly from "
+            "the CONTEXT below.\n"
+            "Rules:\n"
+            "1. If the context does not contain the answer, reply exactly: "
+            "\"I couldn't find that in your documents.\"\n"
+            "2. Do not use outside knowledge, and do not guess.\n"
+            "3. Keep answers concise and factual."
+        )
+
+        parts: List[str] = []
+        if history:
+            transcript = "\n".join(f"{m.sender}: {m.content}" for m in history)
+            parts.append(f"CONVERSATION SO FAR:\n{transcript}")
+
+        if chunks:
+            blocks = "\n\n".join(
+                f"[{i}] source={c['metadata'].get('file_name')} "
+                f"page={c['metadata'].get('page_number')}\n{c['text']}"
+                for i, c in enumerate(chunks, start=1)
+            )
+            parts.append(f"CONTEXT:\n{blocks}")
+        else:
+            parts.append("CONTEXT:\n(no documents matched this question)")
+
+        parts.append(f"QUESTION:\n{query}")
+        parts.append("ANSWER:")
+        return "\n\n".join(parts), system
+
+    @staticmethod
+    def build_citations(chunks: Sequence[Dict[str, Any]], preview_chars: int = 220) -> List[Dict[str, Any]]:
         citations = []
-        for c in chunks:
-            citations.append({
-                "file_name": c["metadata"].get("file_name", "Unknown"),
-                "page_number": c["metadata"].get("page_number", 1),
-                "text_preview": c["text"][:150] + "..."
-            })
-            
+        for position, chunk in enumerate(chunks, start=1):
+            text = chunk["text"]
+            citations.append(
+                {
+                    "position": position,
+                    "file_name": chunk["metadata"].get("file_name", "unknown"),
+                    "page_number": chunk["metadata"].get("page_number", 1),
+                    "excerpt": text[:preview_chars] + ("..." if len(text) > preview_chars else ""),
+                }
+            )
+        return citations
+
+    # ------------------------------------------------------------------
+    # Entry points
+    # ------------------------------------------------------------------
+    @classmethod
+    def answer(cls, query: str, db: Session, user: User, llm) -> Dict[str, Any]:
+        chunks = cls.retrieve(query, db, user)
+        prompt, system = cls.build_prompt(query, cls.recent_history(db, _session_of(db, user)), chunks)
         return {
-            "answer": response,
-            "citations": citations
+            "answer": llm.generate(prompt, system_prompt=system),
+            "citations": cls.build_citations(chunks),
         }
 
     @classmethod
-    def query_stream(cls, query: str, session_id: str, db: Session) -> Generator[str, None, None]:
-        """Streaming query yielding SSE formatted tokens or JSON chunks."""
-        llm = get_llm_provider()
-        
-        # 1. Retrieve history (last 10 messages)
-        history = db.query(ChatMessage)\
-            .filter(ChatMessage.session_id == session_id)\
-            .order_by(ChatMessage.created_at.asc())\
-            .limit(10)\
-            .all()
-            
-        # 2. Retrieve chunks
-        chunks = cls.retrieve_relevant_chunks(query, db, limit=settings.RAG_TOP_K)
-        
-        # 3. Format context & history
-        history_str = "\n".join([f"{m.sender.capitalize()}: {m.content}" for m in history])
-        context_str = "\n\n".join([f"Source: {c['metadata'].get('file_name')} (Page {c['metadata'].get('page_number')})\nContent: {c['text']}" for c in chunks])
-        
-        # 4. Prompt construction
-        system_prompt = (
-            "You are CODDY – THE CHAT BOT.\n"
-            "Answer only using the provided context.\n"
-            "If the answer is not found in the context, respond with:\n"
-            "\"I couldn't find that information in the knowledge base.\""
-        )
-        
-        prompt = ""
-        if history_str:
-            prompt += f"Conversation History:\n{history_str}\n\n"
-            
-        prompt += f"Context:\n{context_str}\n\nQuestion:\n{query}\n\nAnswer:"
-        
-        # 5. Extract citation structures
-        citations = []
-        for c in chunks:
-            citations.append({
-                "file_name": c["metadata"].get("file_name", "Unknown"),
-                "page_number": c["metadata"].get("page_number", 1),
-                "text_preview": c["text"]
-            })
-            
-        # 6. Stream tokens
-        # Standard Server-Sent Events pattern
-        for token in llm.generate_stream(prompt, system_prompt=system_prompt):
-            yield f"data: {json.dumps({'token': token})}\n\n"
-            
-        # 7. Finally, send citations metadata block at the end of the stream
-        yield f"data: {json.dumps({'done': True, 'citations': citations})}\n\n"
+    def stream(
+        cls, query: str, session_id: str, db: Session, user: User, llm
+    ) -> Generator[Dict[str, Any], None, None]:
+        """Yield structured events. The caller owns SSE framing.
+
+        The previous version emitted SSE strings that the endpoint immediately
+        stripped and re-parsed, adding a JSON round-trip per token.
+        """
+        chunks = cls.retrieve(query, db, user)
+        prompt, system = cls.build_prompt(query, cls.recent_history(db, session_id), chunks)
+
+        try:
+            for token in llm.generate_stream(prompt, system_prompt=system):
+                yield {"type": "token", "content": token}
+        except Exception as exc:
+            logger.error(f"Generation failed: {exc}", exc_info=True)
+            yield {"type": "error", "message": "The model failed to generate a response."}
+
+        yield {"type": "citations", "citations": cls.build_citations(chunks)}
+
+
+def _session_of(db: Session, user: User) -> str:
+    """Most recent session for this user. Used by the non-streaming path."""
+    from backend.models.models import ChatSession
+
+    session = db.execute(
+        select(ChatSession)
+        .where(ChatSession.user_id == user.id)
+        .order_by(ChatSession.created_at.desc())
+        .limit(1)
+    ).scalar_one_or_none()
+    return session.id if session else ""
