@@ -1,211 +1,215 @@
-import uuid
-import json
-import datetime
-from typing import Optional, List
-from fastapi import APIRouter, Depends, HTTPException, status, Body
-from fastapi.responses import StreamingResponse
-from sqlalchemy.orm import Session
-from pydantic import BaseModel
+from __future__ import annotations
 
-from backend.database.connection import get_db, SessionLocal
-from backend.models.models import ChatSession, ChatMessage, User
+import json
+import uuid
+from typing import List
+
+from fastapi import APIRouter, Depends, HTTPException, status
+from pydantic import BaseModel, Field
+from sqlalchemy import select
+from sqlalchemy.orm import Session
+
 from backend.api.auth import get_current_user
+from backend.database.connection import SessionLocal, get_db
+from backend.models.models import ChatMessage, ChatSession, User
 from backend.rag.pipeline import RagPipeline
+from backend.services.llm import get_llm_provider
 from backend.utils.logging import logger
 
-router = APIRouter(prefix="/api/chat", tags=["Chat"])
+router = APIRouter(prefix="/api/chat", tags=["chat"])
 
-# Pydantic Schemas
-class QueryPayload(BaseModel):
-    query: str
-    session_id: str
 
 class SessionCreate(BaseModel):
-    title: Optional[str] = "New Conversation"
+    title: str = Field(default="New conversation", max_length=200)
+
 
 class SessionRename(BaseModel):
-    title: str
+    title: str = Field(min_length=1, max_length=200)
 
-@router.post("/session", status_code=status.HTTP_201_CREATED)
+
+class ChatRequest(BaseModel):
+    query: str = Field(min_length=1, max_length=4000)
+    session_id: str
+
+
+def _owned_session(db: Session, session_id: str, user: User) -> ChatSession:
+    """Fetch a session the caller owns.
+
+    Returns 404 rather than 403 for someone else's session so the response
+    does not confirm that the id exists.
+    """
+    session = db.execute(
+        select(ChatSession).where(ChatSession.id == session_id)
+    ).scalar_one_or_none()
+    if session is None or (user.role != "admin" and session.user_id != user.id):
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Session not found.")
+    return session
+
+
+@router.post("/sessions", status_code=status.HTTP_201_CREATED)
 def create_session(
-    payload: Optional[SessionCreate] = None,
+    payload: SessionCreate,
     current_user: User = Depends(get_current_user),
-    db: Session = Depends(get_db)
-):
-    title = payload.title if payload else "New Conversation"
-    session_id = str(uuid.uuid4())
-    
-    new_session = ChatSession(
-        id=session_id,
-        user_id=current_user.id,
-        title=title
-    )
-    db.add(new_session)
+    db: Session = Depends(get_db),
+) -> dict:
+    session = ChatSession(id=str(uuid.uuid4()), user_id=current_user.id, title=payload.title)
+    db.add(session)
     db.commit()
-    db.refresh(new_session)
-    logger.info(f"Created chat session: {session_id} for user: {current_user.email}")
-    return {"session_id": session_id, "title": title}
+    return {"session_id": session.id, "title": session.title}
 
-@router.get("/sessions", response_model=List[dict])
-def get_sessions(current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
-    sessions = db.query(ChatSession)\
-        .filter(ChatSession.user_id == current_user.id)\
-        .order_by(ChatSession.created_at.desc())\
-        .all()
-        
-    return [{
-        "session_id": s.id,
-        "title": s.title,
-        "created_at": s.created_at.isoformat()
-    } for s in sessions]
+
+@router.get("/sessions")
+def list_sessions(
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> List[dict]:
+    stmt = select(ChatSession).where(ChatSession.user_id == current_user.id)
+    sessions = db.execute(stmt.order_by(ChatSession.created_at.desc())).scalars().all()
+    return [
+        {"session_id": s.id, "title": s.title, "created_at": s.created_at.isoformat()}
+        for s in sessions
+    ]
+
 
 @router.put("/sessions/{session_id}")
 def rename_session(
     session_id: str,
     payload: SessionRename,
     current_user: User = Depends(get_current_user),
-    db: Session = Depends(get_db)
-):
-    session = db.query(ChatSession).filter(ChatSession.id == session_id, ChatSession.user_id == current_user.id).first()
-    if not session:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Chat session not found."
-        )
+    db: Session = Depends(get_db),
+) -> dict:
+    session = _owned_session(db, session_id, current_user)
     session.title = payload.title
     db.commit()
-    return {"message": "Session renamed successfully", "session_id": session_id, "title": session.title}
+    return {"session_id": session.id, "title": session.title}
+
 
 @router.delete("/sessions/{session_id}")
 def delete_session(
     session_id: str,
     current_user: User = Depends(get_current_user),
-    db: Session = Depends(get_db)
-):
-    session = db.query(ChatSession).filter(ChatSession.id == session_id, ChatSession.user_id == current_user.id).first()
-    if not session:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Chat session not found."
-        )
+    db: Session = Depends(get_db),
+) -> dict:
+    session = _owned_session(db, session_id, current_user)
     db.delete(session)
     db.commit()
-    logger.info(f"Deleted chat session: {session_id}")
-    return {"message": "Session deleted successfully."}
+    return {"deleted": session_id}
 
-@router.delete("/sessions")
-def clear_sessions(current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
-    db.query(ChatSession).filter(ChatSession.user_id == current_user.id).delete()
-    db.commit()
-    logger.info(f"Cleared all chat sessions for user: {current_user.email}")
-    return {"message": "All conversations cleared successfully."}
 
-@router.get("/history/{session_id}", response_model=List[dict])
-def get_session_history(
+@router.get("/sessions/{session_id}/messages")
+def session_messages(
     session_id: str,
     current_user: User = Depends(get_current_user),
-    db: Session = Depends(get_db)
-):
-    # Verify session ownership
-    session = db.query(ChatSession).filter(ChatSession.id == session_id, ChatSession.user_id == current_user.id).first()
-    if not session:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Session not found."
+    db: Session = Depends(get_db),
+) -> List[dict]:
+    _owned_session(db, session_id, current_user)
+    messages = db.execute(
+        select(ChatMessage)
+        .where(ChatMessage.session_id == session_id)
+        .order_by(ChatMessage.created_at, ChatMessage.id)
+    ).scalars().all()
+
+    out = []
+    for message in messages:
+        try:
+            sources = json.loads(message.sources_json) if message.sources_json else None
+        except (TypeError, ValueError):
+            sources = None
+        out.append(
+            {
+                "id": message.id,
+                "sender": message.sender,
+                "content": message.content,
+                "sources": sources,
+                "created_at": message.created_at.isoformat(),
+            }
         )
-        
-    messages = db.query(ChatMessage)\
-        .filter(ChatMessage.session_id == session_id)\
-        .order_by(ChatMessage.created_at.asc())\
-        .all()
-        
-    result = []
-    for m in messages:
-        sources = None
-        if m.sources_json:
-            try:
-                sources = json.loads(m.sources_json)
-            except Exception:
-                pass
-        result.append({
-            "id": m.id,
-            "sender": m.sender,
-            "content": m.content,
-            "sources": sources,
-            "created_at": m.created_at.isoformat()
-        })
-    return result
+    return out
+
 
 @router.post("")
 def chat(
-    payload: QueryPayload,
-    current_user: User = Depends(get_current_user)
+    payload: ChatRequest,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
 ):
-    # Streaming endpoint returning EventSource protocol
-    query = payload.query
-    session_id = payload.session_id
-    
-    def event_stream_generator():
-        # Open separate session for thread-safety in background generator
+    """Stream an answer as Server-Sent Events.
+
+    Events: {"token": str} | {"citations": [...]} | {"error": str}
+    """
+    _owned_session(db, payload.session_id, current_user)
+
+    def sse(event: dict) -> str:
+        return f"data: {json.dumps(event)}\n\n"
+
+    def stream():
+        # A fresh session: the request-scoped one belongs to the handler thread,
+        # and this generator runs on a worker thread.
         gen_db = SessionLocal()
         try:
-            # 1. Verify session exists and belongs to current user
-            sess = gen_db.query(ChatSession).filter(ChatSession.id == session_id, ChatSession.user_id == current_user.id).first()
-            if not sess:
-                yield f"data: {json.dumps({'error': 'Chat session not found or access denied.'})}\n\n"
-                return
-                
-            # 2. Save User Message
-            user_msg = ChatMessage(
-                session_id=session_id,
-                sender="user",
-                content=query
+            llm = get_llm_provider()
+
+            gen_db.add(
+                ChatMessage(
+                    session_id=payload.session_id,
+                    sender="user",
+                    content=payload.query,
+                )
             )
-            gen_db.add(user_msg)
             gen_db.commit()
-            
-            # Update session title if it is still default "New Conversation" to match query snippet
-            if sess.title == "New Conversation":
-                sess.title = query[:30] + ("..." if len(query) > 30 else "")
+
+            # Give the conversation a useful name the first time it is used.
+            session = gen_db.get(ChatSession, payload.session_id)
+            if session and session.title == "New conversation":
+                session.title = payload.query[:60]
                 gen_db.commit()
-                
-            # 3. Process RAG Stream
-            accumulated_answer = ""
-            citations = []
-            
-            for chunk_sse in RagPipeline.query_stream(query, session_id, gen_db):
-                # Clean prefix 'data: ' and suffix '\n\n' to extract json payload
-                clean_payload = chunk_sse.strip().replace("data: ", "")
-                if not clean_payload:
-                    continue
-                    
-                try:
-                    payload_dict = json.loads(clean_payload)
-                    
-                    if "token" in payload_dict:
-                        accumulated_answer += payload_dict["token"]
-                        
-                    if "citations" in payload_dict:
-                        citations = payload_dict["citations"]
-                except Exception as parse_error:
-                    logger.error(f"Error parsing SSE chunk: {parse_error}")
-                    
-                yield chunk_sse
-                
-            # 4. Save Assistant response with citations
-            assistant_msg = ChatMessage(
-                session_id=session_id,
-                sender="assistant",
-                content=accumulated_answer,
-                sources_json=json.dumps(citations) if citations else None
+
+            answer_parts: List[str] = []
+            citations: List[dict] = []
+
+            for event in RagPipeline.stream(
+                payload.query, payload.session_id, gen_db, current_user, llm
+            ):
+                kind = event.get("type")
+                if kind == "token":
+                    answer_parts.append(event["content"])
+                    yield sse({"token": event["content"]})
+                elif kind == "citations":
+                    citations = event["citations"]
+                    yield sse({"citations": citations})
+                elif kind == "error":
+                    yield sse({"error": event["message"]})
+
+            gen_db.add(
+                ChatMessage(
+                    session_id=payload.session_id,
+                    sender="assistant",
+                    content="".join(answer_parts),
+                    sources_json=json.dumps(citations) if citations else None,
+                )
             )
-            gen_db.add(assistant_msg)
             gen_db.commit()
-            
-        except Exception as err:
-            logger.error(f"Error in chat SSE stream: {err}")
-            yield f"data: {json.dumps({'error': f'Generation error: {str(err)}'})}\n\n"
+
+        except Exception as exc:
+            logger.error("Chat stream failed", exc_info=True)
+            yield sse({"error": "Something went wrong generating a response."})
         finally:
             gen_db.close()
-            
-    return StreamingResponse(event_stream_generator(), media_type="text/event-stream")
+
+    return _streaming_response(stream())
+
+
+def _streaming_response(generator):
+    from fastapi.responses import StreamingResponse
+
+    return StreamingResponse(
+        generator,
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            # Stops nginx and similar proxies from buffering the stream into a
+            # single lump, which would break incremental rendering.
+            "X-Accel-Buffering": "no",
+        },
+    )
