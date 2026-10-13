@@ -1,26 +1,39 @@
 import logging
 import sys
+
 from backend.utils.config import settings
 
-def setup_logging():
-    log_level = getattr(logging, settings.LOG_LEVEL.upper(), logging.INFO)
-    
-    # Configure logging
-    logging.basicConfig(
-        level=log_level,
-        format="%(asctime)s [%(levelname)s] %(name)s - %(message)s",
-        handlers=[
-            logging.StreamHandler(sys.stdout)
-        ]
+
+def configure_logging() -> logging.Logger:
+    level = getattr(logging, settings.LOG_LEVEL.upper(), logging.INFO)
+
+    handler = logging.StreamHandler(sys.stdout)
+    handler.setFormatter(
+        logging.Formatter("%(asctime)s [%(levelname)-7s] %(name)s: %(message)s", "%H:%M:%S")
     )
-    
-    # Set levels for third party libs to avoid clutter
-    logging.getLogger("chromadb").setLevel(logging.WARNING)
-    logging.getLogger("sentence_transformers").setLevel(logging.WARNING)
-    logging.getLogger("urllib3").setLevel(logging.WARNING)
-    
+
+    root = logging.getLogger()
+    root.setLevel(level)
+    # Replace rather than append, so repeated imports do not duplicate output.
+    root.handlers = [handler]
+
+    # Third-party chatter.
+    for noisy in (
+        "chromadb",
+        "sentence_transformers",
+        "urllib3",
+        "httpx",
+        "httpcore",
+        "filelock",
+        "transformers",
+        "pypdf",
+        "markdown_it",
+    ):
+        logging.getLogger(noisy).setLevel(max(level, logging.WARNING))
+
     logger = logging.getLogger("coddy")
-    logger.info("Logging configured successfully.")
+    logger.setLevel(level)
     return logger
 
-logger = setup_logging()
+
+logger = configure_logging()
