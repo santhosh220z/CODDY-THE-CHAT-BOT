@@ -173,5 +173,4 @@ For production environments, configure `DATABASE_URL` to point to a managed SQL 
    * `DATABASE_URL` (provision a Render PostgreSQL instance and copy external connection string).
    * `SECRET_KEY` (your private key).
    * `LLM_PROVIDER` (if connecting to a remote LLM API like Hugging Face, or set to `ollama` if routing to an external endpoint).
-4. Add a "Disk" mount at `/app/uploads` and `/app/vector_store` to ensure local index files persist between deploys.
-by santhosh
+4. Add a "Disk" mount at `/app/uploads` and `/app/vector_store` to ensure local index files persist between deploys
