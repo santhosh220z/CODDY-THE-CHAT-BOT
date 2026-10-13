@@ -1,82 +1,114 @@
-import datetime
-from sqlalchemy import Column, Integer, String, DateTime, ForeignKey, Text, Boolean
-from sqlalchemy.orm import relationship
-from backend.database.connection import Base
+from __future__ import annotations
+
+import datetime as dt
+from typing import List, Optional
+
+from sqlalchemy import (
+    Boolean,
+    DateTime,
+    ForeignKey,
+    Index,
+    Integer,
+    String,
+    Text,
+)
+from sqlalchemy.orm import Mapped, mapped_column, relationship
+
+from backend.database.base import Base
+
+
+def _utcnow() -> dt.datetime:
+    # Naive UTC, matching SQLite's storage. Using aware datetimes here and
+    # naive ones elsewhere makes comparisons fail at query time.
+    return dt.datetime.now(dt.timezone.utc).replace(tzinfo=None)
+
 
 class User(Base):
     __tablename__ = "users"
 
-    id = Column(Integer, primary_key=True, index=True)
-    email = Column(String, unique=True, index=True, nullable=False)
-    hashed_password = Column(String, nullable=False)
-    role = Column(String, default="user") # user, admin
-    is_active = Column(Boolean, default=True)
-    created_at = Column(DateTime, default=datetime.datetime.utcnow)
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    email: Mapped[str] = mapped_column(String(320), unique=True, index=True, nullable=False)
+    hashed_password: Mapped[str] = mapped_column(String(255), nullable=False)
+    # 'user' | 'admin'. Never taken from a request body - see api/auth.py.
+    role: Mapped[str] = mapped_column(String(16), nullable=False, default="user")
+    is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    created_at: Mapped[dt.datetime] = mapped_column(DateTime, nullable=False, default=_utcnow)
 
-    # Relationships
-    documents = relationship("Document", back_populates="uploader", cascade="all, delete-orphan")
-    chat_sessions = relationship("ChatSession", back_populates="user", cascade="all, delete-orphan")
+    documents: Mapped[List["Document"]] = relationship(
+        back_populates="owner", cascade="all, delete-orphan"
+    )
+    sessions: Mapped[List["ChatSession"]] = relationship(
+        back_populates="user", cascade="all, delete-orphan"
+    )
+
 
 class Document(Base):
     __tablename__ = "documents"
 
-    id = Column(Integer, primary_key=True, index=True)
-    name = Column(String, nullable=False)
-    type = Column(String, nullable=False) # pdf, docx, txt, csv, md
-    size = Column(Integer, nullable=False)
-    storage_path = Column(String, nullable=False)
-    uploaded_by = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
-    created_at = Column(DateTime, default=datetime.datetime.utcnow)
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    name: Mapped[str] = mapped_column(String(512), nullable=False)
+    # Extension without the dot: pdf | docx | txt | csv | md
+    file_type: Mapped[str] = mapped_column(String(16), nullable=False)
+    size_bytes: Mapped[int] = mapped_column(Integer, nullable=False)
+    storage_path: Mapped[str] = mapped_column(String(1024), nullable=False)
+    # The uploader owns this document. Retrieval is scoped to this value, so a
+    # user's chat can never return another user's content.
+    owner_id: Mapped[int] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    created_at: Mapped[dt.datetime] = mapped_column(DateTime, nullable=False, default=_utcnow)
 
-    # Relationships
-    uploader = relationship("User", back_populates="documents")
-    chunks = relationship("DocumentChunk", back_populates="document", cascade="all, delete-orphan")
+    owner: Mapped["User"] = relationship(back_populates="documents")
+    chunks: Mapped[List["DocumentChunk"]] = relationship(
+        back_populates="document", cascade="all, delete-orphan"
+    )
+
 
 class DocumentChunk(Base):
     __tablename__ = "document_chunks"
+    __table_args__ = (Index("ix_document_chunks_doc", "document_id", "chunk_index"),)
 
-    id = Column(Integer, primary_key=True, index=True)
-    document_id = Column(Integer, ForeignKey("documents.id", ondelete="CASCADE"), nullable=False)
-    chunk_index = Column(Integer, nullable=False)
-    text = Column(Text, nullable=False)
-    metadata_json = Column(Text, nullable=False) # JSON encoded metadata
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    document_id: Mapped[int] = mapped_column(
+        ForeignKey("documents.id", ondelete="CASCADE"), nullable=False
+    )
+    chunk_index: Mapped[int] = mapped_column(Integer, nullable=False)
+    text: Mapped[str] = mapped_column(Text, nullable=False)
+    # JSON blob: file_name, page_number, user_id, ...
+    metadata_json: Mapped[str] = mapped_column(Text, nullable=False, default="{}")
 
-    # Relationships
-    document = relationship("Document", back_populates="chunks")
-    embeddings = relationship("EmbeddingMetadata", back_populates="chunk", cascade="all, delete-orphan")
+    document: Mapped["Document"] = relationship(back_populates="chunks")
+
 
 class ChatSession(Base):
     __tablename__ = "chat_sessions"
 
-    id = Column(String, primary_key=True, index=True) # UUID string
-    user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
-    title = Column(String, default="New Conversation")
-    created_at = Column(DateTime, default=datetime.datetime.utcnow)
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    user_id: Mapped[int] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    title: Mapped[str] = mapped_column(String(300), nullable=False, default="New conversation")
+    created_at: Mapped[dt.datetime] = mapped_column(DateTime, nullable=False, default=_utcnow)
 
-    # Relationships
-    user = relationship("User", back_populates="chat_sessions")
-    messages = relationship("ChatMessage", back_populates="session", cascade="all, delete-orphan")
+    user: Mapped["User"] = relationship(back_populates="sessions")
+    messages: Mapped[List["ChatMessage"]] = relationship(
+        back_populates="session", cascade="all, delete-orphan", order_by="ChatMessage.created_at"
+    )
+
 
 class ChatMessage(Base):
     __tablename__ = "chat_messages"
+    __table_args__ = (Index("ix_chat_messages_session", "session_id", "created_at"),)
 
-    id = Column(Integer, primary_key=True, index=True)
-    session_id = Column(String, ForeignKey("chat_sessions.id", ondelete="CASCADE"), nullable=False)
-    sender = Column(String, nullable=False) # user or assistant
-    content = Column(Text, nullable=False)
-    sources_json = Column(Text, nullable=True) # JSON encoded citation source dicts
-    created_at = Column(DateTime, default=datetime.datetime.utcnow)
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    session_id: Mapped[str] = mapped_column(
+        ForeignKey("chat_sessions.id", ondelete="CASCADE"), nullable=False
+    )
+    # 'user' | 'assistant'
+    sender: Mapped[str] = mapped_column(String(16), nullable=False)
+    content: Mapped[str] = mapped_column(Text, nullable=False)
+    # JSON array of citation objects.
+    sources_json: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    created_at: Mapped[dt.datetime] = mapped_column(DateTime, nullable=False, default=_utcnow)
 
-    # Relationships
-    session = relationship("ChatSession", back_populates="messages")
-
-class EmbeddingMetadata(Base):
-    __tablename__ = "embedding_metadata"
-
-    id = Column(Integer, primary_key=True, index=True)
-    chunk_id = Column(Integer, ForeignKey("document_chunks.id", ondelete="CASCADE"), nullable=False)
-    vector_store = Column(String, nullable=False) # chroma or faiss
-    embedding_model = Column(String, nullable=False)
-
-    # Relationships
-    chunk = relationship("DocumentChunk", back_populates="embeddings")
+    session: Mapped["ChatSession"] = relationship(back_populates="messages")
