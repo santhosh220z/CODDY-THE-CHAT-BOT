@@ -122,7 +122,7 @@ If you want more headroom:
 pytest backend/tests -v
 ```
 
-70 tests. The suite includes regression tests for three vulnerabilities this
+82 tests. The suite includes regression tests for three vulnerabilities this
 project previously had; see below.
 
 ## Security notes
@@ -162,7 +162,33 @@ was invisible in review:
 - Streaming fed CPU tensors to a CUDA model, so every streamed generation raised
   a device-mismatch error.
 
-The last two were found by the end-to-end run, not by any test.
+A later audit of the running system found a second batch, none of which the
+existing suite could see because it never exercised the path:
+
+- A typo'd email address returned **500, not 422**. The validation handler put a
+  `ValueError` instance in the JSON body, which raised `TypeError` inside the
+  handler. This is the most common client mistake there is.
+- The SSE generator wrote through a *different* database session than the one the
+  request validated against — a time-of-check/time-of-use gap.
+- `split_text` could emit a chunk larger than `CHUNK_SIZE`. A single token over
+  the limit (minified JSON, an unbroken string) was appended whole, because the
+  hard-slice path only ran in one branch.
+- A failed reindex **destroyed the document's chunks**: the delete committed
+  before embedding, so `db.rollback()` could not undo it. SQL and the vector
+  index were left permanently disagreeing.
+- The login rate limiter keyed on `X-Forwarded-For`, which any caller can set —
+  a fresh value per request defeated the brute-force limit entirely.
+- Two concurrent generations each allocated their own KV cache for
+  `MODEL_MAX_CONTEXT` tokens, which does not fit a 6GB card beside resident
+  weights. Generation is now serialised.
+- Two simultaneous registrations could both observe an empty users table and both
+  become administrators.
+- `GET /api/health` constructed the LLM provider, so a provider that failed to
+  build turned the liveness probe into a 500.
+
+The first two were found by the end-to-end run; the rest by an audit that read
+every file and reproduced each finding. Neither the original review nor 64
+passing tests had surfaced them.
 
 ## Limitations
 
