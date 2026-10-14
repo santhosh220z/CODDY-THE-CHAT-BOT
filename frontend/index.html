@@ -1,0 +1,125 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>CODDY</title>
+<link rel="stylesheet" href="/static/css/style.css">
+<!--
+  Vendored, not CDN. Two reasons: the app runs locally and should not depend
+  on network availability, and a third-party script on a page that renders
+  untrusted document text is a supply-chain risk.
+-->
+<script src="/static/js/vendor/marked.min.js"></script>
+<script src="/static/js/vendor/purify.min.js"></script>
+</head>
+<body>
+
+<!-- ===================== AUTH ===================== -->
+<div id="auth-screen" class="auth-wrap">
+  <form class="auth-card glass" id="auth-form">
+    <div class="brand">
+      <div class="brand-mark">C</div>
+      <h1>CODDY</h1>
+      <p class="muted">Your documents, answered privately.</p>
+    </div>
+
+    <div class="tabs" role="tablist">
+      <button type="button" class="tab is-active" data-mode="login" role="tab">Sign in</button>
+      <button type="button" class="tab" data-mode="register" role="tab">Create account</button>
+    </div>
+
+    <label class="field">
+      <span>Email</span>
+      <input type="email" id="auth-email" autocomplete="username" required>
+    </label>
+
+    <label class="field">
+      <span>Password</span>
+      <input type="password" id="auth-password" autocomplete="current-password" required>
+    </label>
+
+    <p class="hint" id="auth-hint"></p>
+    <p class="error" id="auth-error" role="alert"></p>
+
+    <button type="submit" class="btn btn-primary" id="auth-submit">Sign in</button>
+    <p class="muted small">The first account created becomes the administrator.</p>
+  </form>
+</div>
+
+<!-- ===================== APP ===================== -->
+<div id="app" class="app hidden">
+
+  <aside class="sidebar glass">
+    <div class="sidebar-head">
+      <div class="brand-inline">
+        <div class="brand-mark sm">C</div>
+        <span>CODDY</span>
+      </div>
+      <button class="icon-btn" id="logout-btn" title="Sign out" aria-label="Sign out">
+        <svg viewBox="0 0 24 24"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4M16 17l5-5-5-5M21 12H9"/></svg>
+      </button>
+    </div>
+
+    <button class="btn btn-primary btn-block" id="new-chat-btn">New conversation</button>
+
+    <nav class="side-section">
+      <h2>Conversations</h2>
+      <ul id="session-list" class="list"></ul>
+    </nav>
+
+    <nav class="side-section grow">
+      <h2>Documents</h2>
+      <label class="btn btn-ghost btn-block upload-btn">
+        Upload
+        <input type="file" id="file-input" accept=".pdf,.docx,.txt,.csv,.md,.markdown" hidden>
+      </label>
+      <p class="hint" id="upload-hint"></p>
+      <ul id="document-list" class="list"></ul>
+    </nav>
+
+    <div class="sidebar-foot muted small" id="model-status">loading…</div>
+  </aside>
+
+  <main class="chat">
+    <header class="chat-head glass">
+      <h2 id="chat-title">New conversation</h2>
+      <div class="head-meta">
+        <span class="pill" id="doc-count">0 documents</span>
+      </div>
+    </header>
+
+    <div class="messages" id="messages">
+      <div class="empty" id="empty-state">
+        <h3>Ask about your documents</h3>
+        <p class="muted">Upload a PDF, DOCX, TXT, CSV or Markdown file, then ask a question.
+           Answers are grounded in what you uploaded and cite the source.</p>
+      </div>
+    </div>
+
+    <form class="composer glass" id="composer">
+      <textarea id="query" rows="1" placeholder="Ask a question about your documents…" required></textarea>
+      <button type="submit" class="btn btn-primary" id="send-btn" aria-label="Send">
+        <svg viewBox="0 0 24 24"><path d="M22 2 11 13M22 2l-7 20-4-9-9-4 20-7z"/></svg>
+      </button>
+    </form>
+  </main>
+</div>
+
+<!-- ===================== CITATION MODAL ===================== -->
+<div class="modal hidden" id="citation-modal" role="dialog" aria-modal="true" aria-labelledby="citation-title">
+  <div class="modal-card glass">
+    <header>
+      <h3 id="citation-title"></h3>
+      <button class="icon-btn" id="citation-close" aria-label="Close">
+        <svg viewBox="0 0 24 24"><path d="M18 6 6 18M6 6l12 12"/></svg>
+      </button>
+    </header>
+    <p class="muted small" id="citation-meta"></p>
+    <pre id="citation-body"></pre>
+  </div>
+</div>
+
+<script src="/static/js/app.js"></script>
+</body>
+</html>
