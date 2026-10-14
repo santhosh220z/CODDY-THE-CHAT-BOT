@@ -87,29 +87,34 @@ that matter most:
 
 ## Performance
 
-Measured on an RTX 3050 Laptop (6GB VRAM):
+Measured on an RTX 3050 Laptop (6GB VRAM), Qwen3-4B-Instruct-2507 at 4-bit nf4:
 
 | | |
 |---|---|
-| Model load | ~20–35s, once |
-| Peak VRAM | 2.8GB of 6GB |
-| Time to first token | ~1.5–2s |
-| **Throughput** | **~3.2 tok/s** |
+| Model load | ~18s, once per process — on a background thread at startup |
+| Peak VRAM | 2.6GB of 6GB |
+| Time to first token | ~0.6s warm, ~1.4s on a 1500-token prompt |
+| **Decode throughput** | **8–9 tok/s short bursts, ~5 tok/s sustained** |
 
-That throughput is the honest limitation. A 150-token answer takes around 48
-seconds. The cause is `bitsandbytes`: 4-bit nf4 weights are dequantised on every
-token, which costs more than the maths itself.
+Decode speed is stable — measurements over a sustained 150-token generation
+showed no thermal decay, and prompt length, sampling, `repetition_penalty` and
+attention implementation made no measurable difference. The bottleneck is
+`bitsandbytes`, which dequantises 4-bit weights on every token.
 
-Things that help:
+If you want more headroom:
 
-- **Lower `MAX_NEW_TOKENS`.** Halving it roughly halves answer time. This is the
-  cheapest lever and needs no extra software.
+- **Lower `MAX_NEW_TOKENS`.** Answers usually finish well before the limit, and
+  shortening them cuts wall-clock proportionally.
 - **A smaller model.** 1.7B or 2B variants run faster at some cost in quality.
 - **Ollama, optionally.** `backend/services/llm.py` also implements an Ollama
   backend, selected with `LLM_PROVIDER=ollama` and no code changes. llama.cpp
-  reads pre-quantised weights directly, so it is substantially faster than
-  bitsandbytes for the same model. Entirely optional — skip it unless the
+  reads pre-quantised weights directly. Entirely optional — skip it unless the
   throughput above is a problem for you.
+
+> A previous version of this README claimed ~3 tok/s. That figure divided total
+> wall-clock — including an 18s model load and prompt prefill — by token count,
+> which charges fixed startup cost to every token. The number above separates
+> them.
 
 ## Tests
 
@@ -117,7 +122,7 @@ Things that help:
 pytest backend/tests -v
 ```
 
-49 tests. The suite includes regression tests for three vulnerabilities this
+70 tests. The suite includes regression tests for three vulnerabilities this
 project previously had; see below.
 
 ## Security notes
@@ -154,6 +159,10 @@ was invisible in review:
 - SSE frames split across network reads were silently dropped.
 - `pydantic.EmailStr` performs a DNS lookup per registration, rejecting any
   address whose domain does not resolve.
+- Streaming fed CPU tensors to a CUDA model, so every streamed generation raised
+  a device-mismatch error.
+
+The last two were found by the end-to-end run, not by any test.
 
 ## Limitations
 
