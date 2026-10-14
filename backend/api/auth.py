@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+import threading
 from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from fastapi.security import OAuth2PasswordBearer
 from pydantic import BaseModel, Field
 from sqlalchemy import func, select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from backend.auth.security import (
@@ -23,6 +25,10 @@ from backend.utils.rate_limit import client_key, login_limiter, register_limiter
 from backend.utils.validators import Email
 
 router = APIRouter(prefix="/api/auth", tags=["auth"])
+
+# Guards the read-then-insert sequence in register(). A per-process lock is
+# sufficient here: this app is served by a single worker.
+_registration_lock = threading.Lock()
 
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/api/auth/login", auto_error=False)
 
@@ -113,27 +119,40 @@ def register(
             headers={"Retry-After": str(retry_after)},
         )
 
-    email = payload.email.lower().strip()
-    if db.execute(select(User).where(func.lower(User.email) == email)).scalar_one_or_none():
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail="An account with that email already exists.",
-        )
-
     try:
         validate_password_strength(payload.password)
     except PasswordPolicyError as exc:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc))
 
-    # Bootstrap: the very first account gets admin so there is a way in.
-    # Every later registration is a plain user. Promotion happens out of band.
-    is_first_user = (db.scalar(select(func.count()).select_from(User)) or 0) == 0
-    role = "admin" if is_first_user else "user"
+    # Both the duplicate check and the first-user bootstrap read state that
+    # another request can change between the SELECT and the INSERT. Serialise
+    # them, otherwise two simultaneous registrations both observe an empty
+    # users table and both become administrators.
+    with _registration_lock:
+        email = payload.email
+        if db.execute(select(User).where(User.email == email)).scalar_one_or_none():
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="An account with that email already exists.",
+            )
 
-    user = User(email=email, hashed_password=hash_password(payload.password), role=role)
-    db.add(user)
-    db.commit()
-    db.refresh(user)
+        # Bootstrap: the very first account gets admin so there is a way in.
+        # Everyone after that is a plain user. Promotion happens out of band.
+        is_first_user = (db.scalar(select(func.count()).select_from(User)) or 0) == 0
+        role = "admin" if is_first_user else "user"
+
+        user = User(email=email, hashed_password=hash_password(payload.password), role=role)
+        db.add(user)
+        try:
+            db.commit()
+        except IntegrityError:
+            # Another writer won the race between the check and the insert.
+            db.rollback()
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="An account with that email already exists.",
+            )
+        db.refresh(user)
 
     logger.info(f"Registered {user.email} as {user.role}")
     return {"email": user.email, "role": user.role}
@@ -141,8 +160,7 @@ def register(
 
 @router.post("/login", response_model=Token)
 def login(payload: UserLogin, request: Request, db: Session = Depends(get_db)) -> Token:
-    email = payload.email.lower().strip()
-    allowed, retry_after = login_limiter.check(client_key(request), email)
+    allowed, retry_after = login_limiter.check(client_key(request), payload.email)
     if not allowed:
         raise HTTPException(
             status_code=status.HTTP_429_TOO_MANY_REQUESTS,
@@ -150,9 +168,11 @@ def login(payload: UserLogin, request: Request, db: Session = Depends(get_db)) -
             headers={"Retry-After": str(retry_after)},
         )
 
-    user = db.execute(select(User).where(func.lower(User.email) == email)).scalar_one_or_none()
-    # Hash regardless of whether the user exists so the response time does not
-    # reveal which emails are registered.
+    # Addresses are normalised by the Email validator, so this is an exact
+    # match rather than a case-folded comparison.
+    user = db.execute(select(User).where(User.email == payload.email)).scalar_one_or_none()
+    # Verify against a dummy hash when the user is unknown so response time
+    # does not reveal which emails are registered.
     stored_hash = user.hashed_password if user else "$2b$12$" + "." * 53
 
     if not verify_password(payload.password, stored_hash) or user is None:
@@ -168,7 +188,7 @@ def login(payload: UserLogin, request: Request, db: Session = Depends(get_db)) -
             status_code=status.HTTP_403_FORBIDDEN, detail="This account is disabled."
         )
 
-    login_limiter.reset(client_key(request), email)
+    login_limiter.reset(client_key(request), payload.email)
     token = create_access_token(subject=user.email, role=user.role)
     logger.info(f"Login OK for {user.email}")
     return Token(access_token=token, token_type="bearer", role=user.role, email=user.email)
