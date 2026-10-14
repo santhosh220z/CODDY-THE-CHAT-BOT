@@ -59,6 +59,9 @@ class Settings(BaseSettings):
     MODEL_TEMPERATURE: float = Field(default=0.3)
     MODEL_TOP_P: float = Field(default=0.9)
     MODEL_MAX_CONTEXT: int = Field(default=8192)
+    # Load the model on a background thread at startup so the server accepts
+    # requests immediately instead of the first one paying ~20s.
+    PREWARM_MODEL: bool = Field(default=True)
 
     # ollama provider (optional)
     OLLAMA_BASE_URL: str = Field(default="http://localhost:11434")
