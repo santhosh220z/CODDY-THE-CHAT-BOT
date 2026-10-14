@@ -148,7 +148,9 @@ class FaissVectorStore(BaseVectorStore):
         os.makedirs(settings.FAISS_DB_PATH, exist_ok=True)
         self._index_file = os.path.join(settings.FAISS_DB_PATH, "index.faiss")
         self._meta_file = os.path.join(settings.FAISS_DB_PATH, "index_meta.pkl")
-        self._lock = threading.Lock()
+        # Reentrant: upsert_chunks calls delete_document while already holding
+        # this lock, which a plain Lock would deadlock.
+        self._lock = threading.RLock()
         self.dimension = 0
         self._index = None
         self._records: List[Dict[str, Any]] = []
@@ -239,22 +241,30 @@ class FaissVectorStore(BaseVectorStore):
         if self._index is None or self._index.ntotal == 0:
             return
 
-        keep = [i for i, r in enumerate(self._records) if r["metadata"].get("document_id") != int(document_id)]
-        removed = len(self._records) - len(keep)
-        if removed == 0:
-            return
+        # Locked: this reassigns _index and _records and rewrites disk state,
+        # so a concurrent search indexing _records would race.
+        with self._lock:
+            keep = [
+                i for i, r in enumerate(self._records)
+                if r["metadata"].get("document_id") != int(document_id)
+            ]
+            removed = len(self._records) - len(keep)
+            if removed == 0:
+                return
 
-        if keep:
-            vectors = np.vstack([self._index.reconstruct(i) for i in keep]).astype("float32")
-            self._faiss.normalize_L2(vectors)
-            self._index = self._faiss.IndexFlatIP(vectors.shape[1])
-            self._index.add(vectors)
-            self._records = [self._records[i] for i in keep]
-        else:
-            self._records = []
-            self._index = self._faiss.IndexFlatIP(self.dimension or 1)
+            if keep:
+                vectors = np.vstack(
+                    [self._index.reconstruct(i) for i in keep]
+                ).astype("float32")
+                self._faiss.normalize_L2(vectors)
+                self._index = self._faiss.IndexFlatIP(vectors.shape[1])
+                self._index.add(vectors)
+                self._records = [self._records[i] for i in keep]
+            else:
+                self._records = []
+                self._index = self._faiss.IndexFlatIP(self.dimension or 1)
 
-        self._persist()
+            self._persist()
         logger.info(f"Removed {removed} vectors for document {document_id}")
 
 
