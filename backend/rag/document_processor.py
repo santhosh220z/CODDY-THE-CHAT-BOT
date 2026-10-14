@@ -41,28 +41,44 @@ def split_text(text: str, chunk_size: int, chunk_overlap: int) -> List[str]:
         return [text]
 
     chunk_overlap = max(0, min(chunk_overlap, chunk_size - 1))
+    step = chunk_size - chunk_overlap
     # Keep separators so the concatenation of units reproduces the input.
     units = [u for u in re.split(r"(\n{2,}|\n|(?<=[.!?])\s+|\s+)", text) if u]
 
     chunks: List[str] = []
-    current = ""
 
+    def emit(blob: str) -> None:
+        """Append, hard-slicing anything still oversized.
+
+        Every path must go through here. Emitting an oversized buffer directly
+        let a single long token through whole.
+        """
+        if not blob.strip():
+            return
+        if len(blob) <= chunk_size:
+            chunks.append(blob)
+            return
+        for start in range(0, len(blob), step):
+            piece = blob[start: start + chunk_size]
+            if piece.strip():
+                chunks.append(piece)
+            if start + chunk_size >= len(blob):
+                break
+
+    current = ""
     for unit in units:
-        candidate = current + unit
-        if len(candidate) <= chunk_size or not current.strip():
-            current = candidate
-            while len(current) > chunk_size:
-                chunks.append(current[:chunk_size])
-                current = current[chunk_size - chunk_overlap:] if chunk_overlap else ""
+        if len(current) + len(unit) <= chunk_size:
+            current += unit
             continue
 
-        chunks.append(current)
-        # Restart from the tail of what we just emitted.
+        # Current buffer is full: close it and restart from its tail.
+        emit(current)
         tail = current[-chunk_overlap:] if chunk_overlap else ""
+        # If the next unit cannot fit alongside the tail, drop the tail rather
+        # than start a chunk that is already over the limit.
         current = (tail + unit) if len(tail) + len(unit) <= chunk_size else unit
 
-    if current.strip():
-        chunks.append(current)
+    emit(current)
 
     return [c for c in chunks if c.strip()]
 
