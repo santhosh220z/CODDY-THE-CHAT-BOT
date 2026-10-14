@@ -14,6 +14,7 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from backend.api import auth, chat, documents
 from backend.database.connection import init_db
+from backend.services.llm import warm_up_in_background
 from backend.utils.config import settings
 from backend.utils.logging import logger
 
@@ -30,7 +31,13 @@ def create_app() -> FastAPI:
         logger.info(f"CODDY ready  |  llm={settings.LLM_PROVIDER}:{settings.HF_MODEL_ID}")
         logger.info(f"            |  store={settings.VECTOR_STORE_TYPE}  top_k={settings.RAG_TOP_K}")
         logger.info("-" * 62)
+
+        if settings.PREWARM_MODEL:
+            # Load the model in the background so the server is usable
+            # immediately instead of the first request paying ~20s.
+            warm_up_in_background()
         yield
+        logger.info("Shutting down.")
 
     app = FastAPI(
         title="CODDY",
