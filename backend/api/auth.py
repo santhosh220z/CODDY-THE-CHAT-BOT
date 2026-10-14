@@ -4,7 +4,7 @@ from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from fastapi.security import OAuth2PasswordBearer
-from pydantic import BaseModel, EmailStr, Field
+from pydantic import BaseModel, Field
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
@@ -20,6 +20,7 @@ from backend.database.connection import get_db
 from backend.models.models import User
 from backend.utils.logging import logger
 from backend.utils.rate_limit import client_key, login_limiter, register_limiter
+from backend.utils.validators import Email
 
 router = APIRouter(prefix="/api/auth", tags=["auth"])
 
@@ -41,12 +42,13 @@ class UserRegister(BaseModel):
     from the first-account bootstrap inside `register()`.
     """
 
-    email: EmailStr
+    # Validates syntax without a DNS lookup - see utils/validators.py.
+    email: Email
     password: str = Field(min_length=1, max_length=256)
 
 
 class UserLogin(BaseModel):
-    email: EmailStr
+    email: Email
     password: str
 
 
