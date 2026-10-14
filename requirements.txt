@@ -41,6 +41,9 @@ pandas>=2.2
 
 # --- Retrieval -----------------------------------------------------------
 chromadb>=0.5
+# Only needed for VECTOR_STORE_TYPE=faiss, which config.py accepts.
+# Without it, selecting faiss raises ModuleNotFoundError at request time.
+faiss-cpu>=1.8
 sentence-transformers>=3.0
 rank-bm25>=0.2.2
 numpy>=1.26
