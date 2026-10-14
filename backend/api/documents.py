@@ -213,18 +213,34 @@ async def upload_document(
 
 
 def _cleanup(document: Document, db: Session) -> None:
-    """Remove vectors, the file on disk, and the row. Never raises."""
+    """Remove vectors, the file on disk, and the row. Never raises.
+
+    Every step is guarded independently: a failure part-way must not leave the
+    caller with an unhandled exception after some of the teardown has already
+    happened, and must not leave the row behind with the vectors already gone.
+    """
     try:
         get_vector_store().delete_document(document.id)
     except Exception:
-        logger.warning("Vector cleanup failed.", exc_info=True)
-    if os.path.exists(document.storage_path):
-        try:
+        logger.warning("Vector cleanup failed for document %s", document.id, exc_info=True)
+
+    try:
+        if os.path.exists(document.storage_path):
             os.remove(document.storage_path)
-        except OSError:
-            logger.warning("Could not remove %s", document.storage_path)
-    db.delete(document)
-    db.commit()
+    except OSError:
+        logger.warning("Could not remove %s", document.storage_path)
+
+    try:
+        db.delete(document)
+        db.commit()
+    except Exception:
+        db.rollback()
+        logger.error(
+            "Could not delete document row %s; its vectors and file are already "
+            "gone. Delete this row manually to avoid an orphan.",
+            document.id,
+            exc_info=True,
+        )
 
 
 @router.get("", response_model=List[DocumentSummary])
@@ -293,11 +309,17 @@ def reindex_document(
             owner_id=document.owner_id,
         )
 
+        # Embed before touching the database. The previous order committed the
+        # chunk delete first, so a failure here left the document with zero
+        # chunks in SQL while stale vectors remained in the index - the two
+        # retrieval paths then disagreed permanently, and db.rollback() could
+        # not undo an already-committed delete.
+        embeddings = EmbeddingManager.embed_documents([c["text"] for c in chunks])
+        get_vector_store().upsert_chunks(document.id, chunks, embeddings)
+
         db.execute(
             DocumentChunk.__table__.delete().where(DocumentChunk.document_id == document.id)
         )
-        db.commit()
-
         for chunk in chunks:
             db.add(
                 DocumentChunk(
@@ -308,14 +330,18 @@ def reindex_document(
                 )
             )
         db.commit()
-
-        embeddings = EmbeddingManager.embed_documents([c["text"] for c in chunks])
-        get_vector_store().upsert_chunks(document.id, chunks, embeddings)
     except DocumentProcessingError as exc:
+        db.rollback()
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
     except Exception as exc:
         db.rollback()
         logger.error(f"Reindex failed for document {document_id}: {exc}")
+        # The vector store now holds the new chunks. Put it back in step with
+        # the rows that survived the rollback.
+        try:
+            get_vector_store().delete_document(document.id)
+        except Exception:
+            logger.warning("Could not clear vectors after a failed reindex.")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Reindexing failed."
         ) from exc
