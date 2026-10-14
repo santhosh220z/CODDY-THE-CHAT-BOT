@@ -55,9 +55,24 @@ login_limiter = RateLimiter(limit=5, window_seconds=15 * 60)
 register_limiter = RateLimiter(limit=10, window_seconds=60 * 60)
 
 
+# Trusted proxy depth. X-Forwarded-For is only meaningful when a proxy you
+# control sets it; trusting it unconditionally lets any caller forge a new
+# identity per request and bypass the limit entirely.
+TRUSTED_PROXY_COUNT = 0
+
+
 def client_key(request) -> str:
-    """Best-effort client identity for rate limiting."""
-    forwarded = request.headers.get("x-forwarded-for")
-    if forwarded:
-        return forwarded.split(",")[0].strip()
+    """Identity used for rate limiting.
+
+    X-Forwarded-For is ignored unless TRUSTED_PROXY_COUNT is raised to match
+    the number of proxies actually in front of the app. At the default of 0
+    the header is attacker-controlled, so keying on it would let a brute-force
+    attempt reset the counter on every request.
+    """
+    if TRUSTED_PROXY_COUNT:
+        forwarded = request.headers.get("x-forwarded-for")
+        if forwarded:
+            parts = [p.strip() for p in forwarded.split(",") if p.strip()]
+            if len(parts) > TRUSTED_PROXY_COUNT:
+                return parts[-TRUSTED_PROXY_COUNT - 1]
     return request.client.host if request.client else "unknown"
