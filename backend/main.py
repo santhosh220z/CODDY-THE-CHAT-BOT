@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+from contextlib import asynccontextmanager
 from typing import Any, Dict
 
 from fastapi import FastAPI, Request, status
@@ -22,10 +23,20 @@ FRONTEND_DIR = os.path.abspath(
 
 
 def create_app() -> FastAPI:
+    @asynccontextmanager
+    async def lifespan(_: FastAPI):
+        init_db()
+        logger.info("-" * 62)
+        logger.info(f"CODDY ready  |  llm={settings.LLM_PROVIDER}:{settings.HF_MODEL_ID}")
+        logger.info(f"            |  store={settings.VECTOR_STORE_TYPE}  top_k={settings.RAG_TOP_K}")
+        logger.info("-" * 62)
+        yield
+
     app = FastAPI(
         title="CODDY",
         description="Local retrieval-augmented chatbot. Inference runs on this machine.",
         version="1.0.0",
+        lifespan=lifespan,
     )
 
     origins = settings.cors_origin_list
@@ -42,14 +53,6 @@ def create_app() -> FastAPI:
         # Same-origin only. The previous configuration used a wildcard origin
         # alongside credentials, which lets any site drive the API.
         logger.info("CORS disabled - serving same-origin only.")
-
-    @app.on_event("startup")
-    def on_startup() -> None:
-        init_db()
-        logger.info("=" * 62)
-        logger.info(f"CODDY ready  |  llm={settings.LLM_PROVIDER}:{settings.HF_MODEL_ID}")
-        logger.info(f"             |  store={settings.VECTOR_STORE_TYPE}  top_k={settings.RAG_TOP_K}")
-        logger.info("=" * 62)
 
     # --- Error handling: never leak internals -------------------------------
     @app.exception_handler(RequestValidationError)
