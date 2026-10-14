@@ -6,10 +6,12 @@ from contextlib import asynccontextmanager
 from typing import Any, Dict
 
 from fastapi import FastAPI, Request, status
+from fastapi.encoders import jsonable_encoder
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
+from sqlalchemy.exc import IntegrityError
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from backend.api import auth, chat, documents
@@ -64,14 +66,28 @@ def create_app() -> FastAPI:
     # --- Error handling: never leak internals -------------------------------
     @app.exception_handler(RequestValidationError)
     async def on_validation_error(request: Request, exc: RequestValidationError):
+        # exc.errors() can carry a ValueError instance in ctx, which is not
+        # JSON serialisable. Passing it through raw raised a TypeError inside
+        # the handler, so a typo'd email returned 500 instead of 422.
         return JSONResponse(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-            content={"detail": exc.errors()},
+            # Literal rather than the status constant: starlette renamed it across
+# versions and the literal is stable.
+    status_code=422,
+            content=jsonable_encoder({"detail": exc.errors()}),
         )
 
     @app.exception_handler(StarletteHTTPException)
     async def on_http_exception(request: Request, exc: StarletteHTTPException):
         return JSONResponse(status_code=exc.status_code, content={"detail": exc.detail})
+
+    @app.exception_handler(IntegrityError)
+    async def on_integrity_error(request: Request, exc: IntegrityError):
+        """A unique-constraint violation is a client conflict, not a crash."""
+        logger.warning(f"Integrity error on {request.url.path}: {exc.orig}")
+        return JSONResponse(
+            status_code=status.HTTP_409_CONFLICT,
+            content={"detail": "That value is already taken."},
+        )
 
     @app.exception_handler(Exception)
     async def on_unexpected_error(request: Request, exc: Exception):
@@ -89,15 +105,31 @@ def create_app() -> FastAPI:
 
     @app.get("/api/health", tags=["meta"])
     def health() -> Dict[str, Any]:
-        from backend.services.llm import get_llm_provider
+        """Liveness probe.
 
+        Deliberately does not construct the LLM provider: the frontend polls
+        this on page load, and a provider that fails to build would turn the
+        liveness probe into a 500.
+        """
         payload: Dict[str, Any] = {
             "status": "ok",
             "llm": settings.LLM_PROVIDER,
+            "model": settings.HF_MODEL_ID if settings.LLM_PROVIDER != "ollama" else settings.OLLAMA_MODEL,
+            "model_loaded": False,
             "vector_store": settings.VECTOR_STORE_TYPE,
         }
-        if hasattr(get_llm_provider(), "info"):
-            payload["details"] = get_llm_provider().info()
+
+        # Report residency only if a provider already exists; do not create one.
+        try:
+            from backend.services import llm as llm_module
+
+            existing = llm_module._provider
+            if existing is not None and hasattr(existing, "info"):
+                payload["model_loaded"] = getattr(existing, "_model", None) is not None
+                payload["details"] = existing.info()
+        except Exception:
+            logger.debug("Provider introspection failed", exc_info=True)
+
         return payload
 
     # --- Frontend -----------------------------------------------------------
