@@ -130,3 +130,29 @@ def get_llm_provider() -> LLMProvider:
                 f"4-bit={settings.LOAD_IN_4BIT}). Weights load on first request."
             )
     return _provider
+
+
+def warm_up_in_background() -> None:
+    """Start loading the model on a background thread.
+
+    Loading takes roughly 20 seconds. Doing it during startup means the server
+    is answering requests immediately while the weights load, instead of the
+    first user waiting for it. Failures are logged and ignored: the request
+    path will retry and surface the error properly if it is real.
+    """
+    import threading
+
+    def warm():
+        try:
+            provider = get_llm_provider()
+            if hasattr(provider, "load"):
+                logger.info("Warming up the language model in the background...")
+                provider.load()
+                logger.info("Language model ready.")
+        except Exception:
+            logger.error("Model warm-up failed; the first request will retry.",
+                         exc_info=True)
+
+    thread = threading.Thread(target=warm, name="model-warmup", daemon=True)
+    thread.start()
+    return thread
