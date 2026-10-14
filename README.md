@@ -102,12 +102,14 @@ token, which costs more than the maths itself.
 
 Things that help:
 
-- **Lower `MAX_NEW_TOKENS`.** Halving it roughly halves answer time.
-- **Use Ollama.** llama.cpp reads pre-quantised weights directly and is
-  substantially faster for the same model. Install it, run `ollama pull qwen3:4b`,
-  then set `LLM_PROVIDER=ollama` in `.env`. No code changes — the provider is
-  already implemented.
+- **Lower `MAX_NEW_TOKENS`.** Halving it roughly halves answer time. This is the
+  cheapest lever and needs no extra software.
 - **A smaller model.** 1.7B or 2B variants run faster at some cost in quality.
+- **Ollama, optionally.** `backend/services/llm.py` also implements an Ollama
+  backend, selected with `LLM_PROVIDER=ollama` and no code changes. llama.cpp
+  reads pre-quantised weights directly, so it is substantially faster than
+  bitsandbytes for the same model. Entirely optional — skip it unless the
+  throughput above is a problem for you.
 
 ## Tests
 
