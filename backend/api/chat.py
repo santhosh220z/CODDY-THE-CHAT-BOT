@@ -137,16 +137,29 @@ def chat(
 
     Events: {"token": str} | {"citations": [...]} | {"error": str}
     """
+    # Fast path: reject an unknown or unowned session with a 404 before any
+    # streaming begins. The generator re-checks against its own session, because
+    # this one may be deleted between the two.
     _owned_session(db, payload.session_id, current_user)
 
     def sse(event: dict) -> str:
         return f"data: {json.dumps(event)}\n\n"
 
     def stream():
-        # A fresh session: the request-scoped one belongs to the handler thread,
-        # and this generator runs on a worker thread.
+        # The generator runs on a worker thread after the request handler has
+        # returned, so it gets its own session. Ownership must be re-checked
+        # against THIS session: checking on the request session and then writing
+        # on another is a time-of-check/time-of-use gap, and a session deleted
+        # in between would fail on insert with a confusing error.
         gen_db = SessionLocal()
         try:
+            session = gen_db.get(ChatSession, payload.session_id)
+            if session is None or (
+                current_user.role != "admin" and session.user_id != current_user.id
+            ):
+                yield sse({"error": "Session not found."})
+                return
+
             llm = get_llm_provider()
 
             gen_db.add(
@@ -159,8 +172,7 @@ def chat(
             gen_db.commit()
 
             # Give the conversation a useful name the first time it is used.
-            session = gen_db.get(ChatSession, payload.session_id)
-            if session and session.title == "New conversation":
+            if session.title == "New conversation":
                 session.title = payload.query[:60]
                 gen_db.commit()
 
