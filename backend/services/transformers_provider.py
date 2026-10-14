@@ -29,6 +29,13 @@ class TransformersProvider:
         self._tokenizer = None
         self._model_id = settings.HF_MODEL_ID
         self._lock = threading.Lock()
+        # Generation is serialised separately from loading. Two concurrent
+        # generate() calls each allocate their own KV cache for
+        # MODEL_MAX_CONTEXT tokens, which does not fit a 6GB card alongside the
+        # resident 4-bit weights - the loser gets an opaque CUDA OOM mid
+        # answer. One at a time is slower and predictable rather than fast and
+        # occasionally fatal.
+        self._generate_lock = threading.Lock()
         self.loaded_at: Optional[float] = None
         self.load_seconds: float = 0.0
 
@@ -163,7 +170,7 @@ class TransformersProvider:
         text = self._encode(prompt, system_prompt)
         inputs = self._tokenizer(text, return_tensors="pt").to(self._model.device)
 
-        with torch.inference_mode():
+        with self._generate_lock, torch.inference_mode():
             output = self._model.generate(**inputs, **self._sampling())
 
         # Slice off the prompt so only the completion is decoded.
@@ -198,7 +205,8 @@ class TransformersProvider:
 
         def run() -> None:
             try:
-                with torch.inference_mode():
+                # One generation at a time; see _generate_lock.
+                with self._generate_lock, torch.inference_mode():
                     self._model.generate(**kwargs)
             except BaseException as exc:  # surfaced on the consumer side
                 error.append(exc)
