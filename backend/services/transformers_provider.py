@@ -184,7 +184,9 @@ class TransformersProvider:
         from transformers import TextIteratorStreamer
 
         text = self._encode(prompt, system_prompt)
-        inputs = self._tokenizer(text, return_tensors="pt")
+        # Must land on the model's device, same as generate(). Feeding CPU
+        # tensors to a CUDA model raises a device-mismatch error mid-stream.
+        inputs = self._tokenizer(text, return_tensors="pt").to(self._model.device)
 
         streamer = TextIteratorStreamer(
             self._tokenizer, skip_prompt=True, skip_special_tokens=True
