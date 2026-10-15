@@ -2,7 +2,7 @@
 
 /* CODDY frontend.
 
-   Two things here are load-bearing and easy to regress:
+   Four things here are load-bearing and easy to regress:
 
    1. renderMarkdown() sanitises before the result ever reaches innerHTML.
       Assistant output quotes uploaded documents, so it is untrusted input.
@@ -12,6 +12,19 @@
    2. The SSE reader carries a buffer between network reads. Frames do not
       align with chunk boundaries, so splitting each read independently drops
       or truncates events.
+
+   3. Every list has three states: loading, empty, error. Each names the cause
+      and the next action. A list that only renders the happy path tells the
+      reader nothing when a fetch fails.
+
+   4. There is no sign-in step. The server provisions one local account and
+      hands out a session, so a 401 means the token expired rather than that
+      the reader was never authenticated. It is refreshed once and the request
+      retried, never treated as a reason to show a login screen.
+
+   Streaming renders textContent per animation frame and parses markdown once
+   at the end. Parsing the whole buffer on every token was quadratic and made
+   half-finished markdown flicker as it re-parsed.
 */
 
 const TOKEN_KEY = 'coddy_token';
@@ -19,7 +32,6 @@ const TOKEN_KEY = 'coddy_token';
 const state = {
   token: localStorage.getItem(TOKEN_KEY) || '',
   user: null,
-  mode: 'login',
   sessionId: null,
   busy: false,
 };
@@ -73,7 +85,37 @@ function setText(el, value) {
   el.textContent = value == null ? '' : String(value);
 }
 
-async function api(path, options = {}) {
+function makeEl(tag, className, value) {
+  const el = document.createElement(tag);
+  if (className) el.className = className;
+  if (value != null) setText(el, value);
+  return el;
+}
+
+/* The server provisions its own account, so a session is acquired rather than
+   entered. Concurrent callers share one in-flight request. */
+let sessionRequest = null;
+
+function localSession() {
+  if (!sessionRequest) {
+    sessionRequest = fetch('/api/auth/local')
+      .then((response) => {
+        if (!response.ok) throw new Error(`The server returned ${response.status}.`);
+        return response.json();
+      })
+      .then((data) => {
+        state.token = data.access_token;
+        localStorage.setItem(TOKEN_KEY, state.token);
+        return data;
+      })
+      .finally(() => {
+        sessionRequest = null;
+      });
+  }
+  return sessionRequest;
+}
+
+async function api(path, options = {}, retried = false) {
   const opts = { ...options, headers: { ...(options.headers || {}) } };
   if (state.token) opts.headers.Authorization = `Bearer ${state.token}`;
   if (opts.body && !(opts.body instanceof FormData)) {
@@ -83,10 +125,14 @@ async function api(path, options = {}) {
 
   const response = await fetch(path, opts);
 
-  if (response.status === 401) {
-    signOut();
-    throw new Error('Session expired. Sign in again.');
+  // A 401 here means the stored token went stale. Refreshing once and
+  // replaying keeps an expired session from throwing the reader out of a
+  // local app that has no way to sign back in.
+  if (response.status === 401 && !retried) {
+    await localSession();
+    return api(path, options, true);
   }
+
   if (!response.ok) {
     let detail = `Request failed (${response.status})`;
     try {
@@ -95,155 +141,173 @@ async function api(path, options = {}) {
         detail = typeof data.detail === 'string' ? data.detail : JSON.stringify(data.detail);
       }
     } catch (_) { /* non-JSON error body */ }
+    if (response.status === 401) {
+      localStorage.removeItem(TOKEN_KEY);
+      state.token = '';
+    }
     throw new Error(detail);
   }
   return response.status === 204 ? null : response.json();
 }
 
-// ---------------------------------------------------------------------------
-// Auth
-// ---------------------------------------------------------------------------
-function showAuth() {
-  $('auth-screen').classList.remove('hidden');
-  $('app').classList.add('hidden');
-}
+/* The three states of a data view. An empty state says why it is empty and
+   what fills it; an error state says what failed and offers the retry. */
+function setListState(id, options) {
+  const box = $(id);
+  const opts = options || {};
+  box.replaceChildren();
+  box.classList.toggle('is-fault', opts.kind === 'error');
+  box.classList.toggle('hidden', !opts.message);
 
-function showApp() {
-  $('auth-screen').classList.add('hidden');
-  $('app').classList.remove('hidden');
-}
+  if (!opts.message) return;
 
-function signOut() {
-  state.token = '';
-  state.user = null;
-  state.sessionId = null;
-  localStorage.removeItem(TOKEN_KEY);
-  showAuth();
-}
-
-async function submitAuth(event) {
-  event.preventDefault();
-  const email = $('auth-email').value.trim();
-  const password = $('auth-password').value;
-  const errorEl = $('auth-error');
-  errorEl.textContent = '';
-
-  if (password.length > 72) {
-    errorEl.textContent = 'Password must be at most 72 bytes.';
-    return;
+  box.appendChild(makeEl('span', null, opts.message));
+  if (opts.detail) box.appendChild(makeEl('span', 'state-detail', opts.detail));
+  if (opts.action) {
+    const btn = makeEl('button', 'btn btn-sm state-action', opts.action.label);
+    btn.type = 'button';
+    btn.addEventListener('click', opts.action.run);
+    box.appendChild(btn);
   }
-
-  const button = $('auth-submit');
-  button.disabled = true;
-  try {
-    const path = state.mode === 'login' ? '/api/auth/login' : '/api/auth/register';
-    const data = await api(path, { method: 'POST', body: { email, password } });
-
-    if (state.mode === 'register') {
-      $('auth-hint').textContent = 'Account created. Signing you in…';
-      const login = await api('/api/auth/login', { method: 'POST', body: { email, password } });
-      state.token = login.access_token;
-    } else {
-      state.token = data.access_token;
-    }
-
-    localStorage.setItem(TOKEN_KEY, state.token);
-    $('auth-password').value = '';
-    await enterApp();
-  } catch (err) {
-    errorEl.textContent = err.message;
-  } finally {
-    button.disabled = false;
-  }
-}
-
-async function enterApp() {
-  state.user = await api('/api/auth/profile');
-  showApp();
-  await Promise.all([loadSessions(), loadDocuments(), loadStatus()]);
-  await createSession();
-}
-
-function wireAuth() {
-  $('auth-form').addEventListener('submit', submitAuth);
-
-  document.querySelectorAll('.tab').forEach((tab) => {
-    tab.addEventListener('click', () => {
-      document.querySelectorAll('.tab').forEach((t) => t.classList.remove('is-active'));
-      tab.classList.add('is-active');
-      state.mode = tab.dataset.mode;
-      $('auth-submit').textContent = state.mode === 'login' ? 'Sign in' : 'Create account';
-      $('auth-error').textContent = '';
-      $('auth-hint').textContent = '';
-      $('auth-password').autocomplete = state.mode === 'login' ? 'current-password' : 'new-password';
-    });
-  });
-
-  $('logout-btn').addEventListener('click', signOut);
 }
 
 // ---------------------------------------------------------------------------
 // Sessions
 // ---------------------------------------------------------------------------
+function sessionFault(message, detail) {
+  setListState('session-state', {
+    kind: 'error',
+    message,
+    detail,
+    action: { label: 'Try again', run: loadSessions },
+  });
+}
+
 async function loadSessions() {
+  setListState('session-state', { message: 'Loading conversations' });
+  let sessions;
   try {
-    const sessions = await api('/api/chat/sessions');
-    const list = $('session-list');
-    list.replaceChildren();
+    sessions = await api('/api/chat/sessions');
+  } catch (err) {
+    $('session-list').replaceChildren();
+    sessionFault('Could not load conversations.', err.message);
+    return;
+  }
 
-    if (!sessions.length) {
-      const li = document.createElement('li');
-      li.className = 'muted small';
-      setText(li, 'No conversations yet');
-      list.appendChild(li);
-      return;
-    }
+  const list = $('session-list');
+  list.replaceChildren();
 
-    sessions.forEach((session) => {
-      const li = document.createElement('li');
-      li.className = state.sessionId === session.session_id ? 'is-active' : '';
-      li.addEventListener('click', () => openSession(session.session_id));
+  if (!sessions.length) {
+    setListState('session-state', {
+      message: 'No conversations yet.',
+      detail: 'Ask a question and this becomes the first one.',
+    });
+    return;
+  }
 
-      const label = document.createElement('span');
-      label.className = 'label';
-      setText(label, session.title);            // user-controlled: textContent
+  setListState('session-state', {});
+  sessions.forEach((session) => {
+    const li = document.createElement('li');
+    li.className = state.sessionId === session.session_id ? 'is-active' : '';
+    li.dataset.kind = 'session';
 
-      const actions = document.createElement('span');
-      actions.className = 'row-actions';
+    // The row's own control is a real button, so the list is keyboard
+    // reachable. The action buttons sit beside it rather than inside it,
+    // which keeps the markup valid.
+    const open = makeEl('button', 'label');
+    open.type = 'button';
+    setText(open, session.title);            // user-controlled: textContent
+    open.addEventListener('click', () => openSession(session.session_id));
 
-      const rename = document.createElement('button');
-      setText(rename, 'Rename');
-      rename.addEventListener('click', (event) => {
-        event.stopPropagation();
-        const next = window.prompt('New title', session.title);
-        if (next && next.trim()) {
-          api(`/api/chat/sessions/${session.session_id}`, { method: 'PUT', body: { title: next.trim() } })
-            .then(loadSessions)
-            .catch((err) => window.alert(err.message));
-        }
-      });
+    const actions = document.createElement('span');
+    actions.className = 'row-actions';
 
-      const remove = document.createElement('button');
-      remove.className = 'danger';
-      setText(remove, 'Delete');
-      remove.addEventListener('click', (event) => {
-        event.stopPropagation();
-        if (!window.confirm('Delete this conversation?')) return;
+    const rename = makeEl('button', null, 'Rename');
+    rename.type = 'button';
+    rename.addEventListener('click', (event) => {
+      event.stopPropagation();
+      beginRename(li, session);
+    });
+
+    const remove = makeEl('button', 'danger', 'Delete');
+    remove.type = 'button';
+    remove.addEventListener('click', (event) => {
+      event.stopPropagation();
+      armDelete(remove, () => {
         api(`/api/chat/sessions/${session.session_id}`, { method: 'DELETE' })
           .then(() => {
             if (state.sessionId === session.session_id) createSession();
             else loadSessions();
           })
-          .catch((err) => window.alert(err.message));
+          .catch((err) => sessionFault('Could not delete that conversation.', err.message));
       });
-
-      actions.append(rename, remove);
-      li.append(label, actions);
-      list.appendChild(li);
     });
-  } catch (err) {
-    console.error('loadSessions failed', err);
+
+    actions.append(rename, remove);
+    li.append(open, actions);
+    list.appendChild(li);
+  });
+}
+
+/* Two-step delete. The button arms, a second click commits, and it disarms
+   itself after four seconds. window.confirm cannot be styled, is invisible to
+   assistive tech on some platforms, and blocks the main thread. */
+function armDelete(button, commit) {
+  if (button.classList.contains('armed')) {
+    clearTimeout(button._armTimer);
+    button.classList.remove('armed');
+    setText(button, button.dataset.rest);
+    commit();
+    return;
   }
+  button.dataset.rest = button.textContent;
+  button.classList.add('armed');
+  setText(button, 'Confirm');
+  button._armTimer = setTimeout(() => {
+    button.classList.remove('armed');
+    setText(button, button.dataset.rest);
+  }, 4000);
+}
+
+/* Inline rename. Replaces window.prompt so the field can be styled, focused
+   predictably, and committed with Enter or cancelled with Escape. */
+function beginRename(li, session) {
+  if (li.querySelector('.rename-input')) return;
+
+  const input = document.createElement('input');
+  input.className = 'rename-input';
+  input.type = 'text';
+  input.value = session.title;
+  input.setAttribute('aria-label', 'Conversation title');
+  input.maxLength = 300;
+  li.replaceChildren(input);
+  input.focus();
+  input.select();
+
+  let settled = false;
+  const finish = (commit) => {
+    if (settled) return;
+    settled = true;
+    const next = input.value.trim();
+    if (!commit || !next || next === session.title) {
+      loadSessions();
+      return;
+    }
+    api(`/api/chat/sessions/${session.session_id}`, { method: 'PUT', body: { title: next } })
+      .then(loadSessions)
+      .catch((err) => sessionFault('Could not rename that conversation.', err.message));
+  };
+
+  input.addEventListener('keydown', (event) => {
+    if (event.key === 'Enter') {
+      event.preventDefault();
+      finish(true);
+    } else if (event.key === 'Escape') {
+      event.preventDefault();
+      finish(false);
+    }
+  });
+  input.addEventListener('blur', () => finish(true));
 }
 
 async function createSession() {
@@ -251,7 +315,6 @@ async function createSession() {
   state.sessionId = session.session_id;
   setText($('chat-title'), session.title);
   $('messages').replaceChildren(emptyState());
-  $('empty-state').classList.remove('hidden');
   await loadSessions();
   return session.session_id;
 }
@@ -259,12 +322,17 @@ async function createSession() {
 function emptyState() {
   const wrap = document.createElement('div');
   wrap.className = 'empty';
-  const heading = document.createElement('h3');
-  setText(heading, 'Ask about your documents');
-  const body = document.createElement('p');
-  body.className = 'muted';
-  setText(body, 'Upload a PDF, DOCX, TXT, CSV or Markdown file, then ask a question. Answers are grounded in what you uploaded and cite the source.');
-  wrap.append(heading, body);
+  wrap.append(
+    makeEl('h2', null, 'Ask about your documents'),
+    makeEl('p', null,
+      'Coddy answers only from the files you upload, and every answer names the page it came from.'),
+  );
+  const steps = makeEl('p', 'empty-steps');
+  steps.append(
+    makeEl('strong', null, 'PDF, DOCX, TXT, CSV or Markdown.'),
+    document.createTextNode(' Nothing leaves this machine.'),
+  );
+  wrap.append(steps);
   return wrap;
 }
 
@@ -273,6 +341,7 @@ async function openSession(sessionId) {
   const messages = $('messages');
   messages.replaceChildren();
 
+  setListState('session-state', { message: 'Opening conversation' });
   try {
     const history = await api(`/api/chat/sessions/${sessionId}/messages`);
     setText($('chat-title'), history.length ? history[0].content.slice(0, 50) : 'Conversation');
@@ -285,85 +354,112 @@ async function openSession(sessionId) {
     await loadSessions();
     scrollToBottom();
   } catch (err) {
-    window.alert(err.message);
+    sessionFault('Could not open that conversation.', err.message);
   }
 }
 
 $('new-chat-btn').addEventListener('click', () => {
   if (state.busy) return;
-  createSession().catch((err) => window.alert(err.message));
+  setNav(false);
+  createSession().catch((err) => sessionFault('Could not start a conversation.', err.message));
 });
 
 // ---------------------------------------------------------------------------
 // Documents
 // ---------------------------------------------------------------------------
+function documentFault(message, detail) {
+  setListState('document-state', {
+    kind: 'error',
+    message,
+    detail,
+    action: { label: 'Try again', run: loadDocuments },
+  });
+}
+
 async function loadDocuments() {
+  setListState('document-state', { message: 'Loading documents' });
+  let documents;
   try {
-    const documents = await api('/api/documents');
-    const list = $('document-list');
-    list.replaceChildren();
-    setText($('doc-count'), `${documents.length} document${documents.length === 1 ? '' : 's'}`);
+    documents = await api('/api/documents');
+  } catch (err) {
+    $('document-list').replaceChildren();
+    documentFault('Could not load documents.', err.message);
+    return;
+  }
 
-    if (!documents.length) {
-      const li = document.createElement('li');
-      li.className = 'muted small';
-      setText(li, 'Nothing uploaded yet');
-      list.appendChild(li);
-      return;
-    }
+  const list = $('document-list');
+  list.replaceChildren();
+  setText($('doc-count'), `${documents.length} document${documents.length === 1 ? '' : 's'}`);
 
-    documents.forEach((doc) => {
-      const li = document.createElement('li');
+  if (!documents.length) {
+    setListState('document-state', {
+      message: 'No documents yet.',
+      detail: 'Upload a file and it becomes the ground for every answer.',
+      action: { label: 'Upload a file', run: () => $('file-input').click() },
+    });
+    return;
+  }
 
-      const label = document.createElement('span');
-      label.className = 'label';
-      // setText, never innerHTML: the filename is user-controlled.
-      setText(label, `${doc.name} · ${(doc.size_bytes / 1024).toFixed(0)}KB`);
-      label.title = doc.name;
+  setListState('document-state', {});
+  documents.forEach((doc) => {
+    const li = document.createElement('li');
+    li.dataset.kind = 'document';
 
-      const actions = document.createElement('span');
-      actions.className = 'row-actions';
+    const label = makeEl('span', 'label');
+    // setText, never innerHTML: the filename is user-controlled.
+    setText(label, doc.name);
+    label.title = doc.name;
 
-      const reindex = document.createElement('button');
-      setText(reindex, 'Reindex');
-      reindex.addEventListener('click', (event) => {
-        event.stopPropagation();
-        reindexButton(doc, reindex);
-      });
+    // The size sits in its own mono column rather than being appended to the
+    // name. A catalogue reads as name plus figures, and the split is what
+    // keeps this ledger from looking identical to the conversation ledger.
+    const figures = makeEl('span', 'figures', `${Math.round(doc.size_bytes / 1024)} KB`);
 
-      const remove = document.createElement('button');
-      remove.className = 'danger';
-      setText(remove, 'Delete');
-      remove.addEventListener('click', (event) => {
-        event.stopPropagation();
-        if (!window.confirm(`Delete "${doc.name}"?`)) return;
+    const actions = document.createElement('span');
+    actions.className = 'row-actions';
+
+    const reindex = makeEl('button', null, 'Reindex');
+    reindex.type = 'button';
+    reindex.addEventListener('click', (event) => {
+      event.stopPropagation();
+      reindexButton(doc, reindex);
+    });
+
+    const remove = makeEl('button', 'danger', 'Delete');
+    remove.type = 'button';
+    remove.addEventListener('click', (event) => {
+      event.stopPropagation();
+      armDelete(remove, () => {
         api(`/api/documents/${doc.id}`, { method: 'DELETE' })
           .then(loadDocuments)
-          .catch((err) => window.alert(err.message));
+          .catch((err) => documentFault('Could not delete that document.', err.message));
       });
-
-      actions.append(reindex, remove);
-      li.append(label, actions);
-      list.appendChild(li);
     });
-  } catch (err) {
-    console.error('loadDocuments failed', err);
-  }
+
+    actions.append(reindex, remove);
+    li.append(label, figures, actions);
+    list.appendChild(li);
+  });
 }
 
 async function reindexButton(doc, button) {
   const original = button.textContent;
   button.disabled = true;
-  setText(button, 'Working…');
+  setText(button, 'Working');
+  setText($('upload-hint'), `Reindexing ${doc.name}`);
   try {
-    await api(`/api/documents/${doc.id}/reindex`, { method: 'POST' });
+    const result = await api(`/api/documents/${doc.id}/reindex`, { method: 'POST' });
+    setText($('upload-hint'), `${doc.name} reindexed, ${result.chunks} chunks`);
   } catch (err) {
-    window.alert(err.message);
+    documentFault('Could not reindex that document.', err.message);
   } finally {
     button.disabled = false;
     setText(button, original);
+    setTimeout(() => setText($('upload-hint'), ''), 6000);
   }
 }
+
+$('upload-btn').addEventListener('click', () => $('file-input').click());
 
 $('file-input').addEventListener('change', async (event) => {
   const file = event.target.files[0];
@@ -372,108 +468,188 @@ $('file-input').addEventListener('change', async (event) => {
   const hint = $('upload-hint');
   const form = new FormData();
   form.append('file', file);
-  setText(hint, `Indexing ${file.name}…`);
+  setText(hint, `Indexing ${file.name}`);
 
   try {
     const result = await api('/api/documents', { method: 'POST', body: form });
-    setText(hint, `${result.name} → ${result.chunks} chunks`);
+    setText(hint, `${result.name} indexed, ${result.chunks} chunks`);
     await loadDocuments();
   } catch (err) {
-    setText(hint, err.message);
+    documentFault('Upload failed.', err.message);
   } finally {
     event.target.value = '';
-    setTimeout(() => setText(hint, ''), 6000);
+    setTimeout(() => setText($('upload-hint'), ''), 8000);
   }
 });
 
+/* The status dot marks a real state the health probe reports, so it is polled
+   only while the model is still loading. Once it is resident there is nothing
+   left to watch and the timer stops. */
+let statusTimer = null;
+
+function scheduleStatus(delay) {
+  clearTimeout(statusTimer);
+  if (delay) statusTimer = setTimeout(loadStatus, delay);
+}
+
 async function loadStatus() {
-  const el = $('model-status');
+  const dot = $('model-dot');
+  const label = $('model-status');
   try {
     const health = await api('/api/health');
     const detail = health.details || {};
-    const model = detail.model_id || health.llm;
-    const vram = detail.vram_total_gb ? ` · ${detail.vram_total_gb}GB VRAM` : '';
-    setText(el, `${model}${detail.quantization ? ` (${detail.quantization})` : ''}${vram}`);
+    const model = detail.model_id || health.model || health.llm || 'model';
+
+    if (health.model_loaded) {
+      dot.dataset.state = 'ready';
+      const vram = detail.vram_total_gb ? `, ${detail.vram_total_gb}GB` : '';
+      setText(label, `${model}${detail.quantization ? `, ${detail.quantization}` : ''}${vram}`);
+      scheduleStatus(0);
+    } else {
+      dot.dataset.state = 'warming';
+      setText(label, `${model}, loading into memory`);
+      scheduleStatus(6000);
+    }
   } catch (_) {
-    setText(el, 'status unavailable');
+    dot.dataset.state = 'unknown';
+    setText(label, 'Model status unavailable');
+    scheduleStatus(0);
   }
 }
 
 // ---------------------------------------------------------------------------
-// Messages
+// Turns, citations and the dialog
 // ---------------------------------------------------------------------------
 function appendMessage(sender, content, sources) {
-  $('empty-state')?.classList.add('hidden');
+  const column = $('messages');
+  // The empty state is replaced by the first turn, not left stacked above it.
+  column.querySelector('.empty')?.remove();
 
-  const wrap = document.createElement('div');
-  wrap.className = `msg ${sender === 'user' ? 'user' : ''}`;
+  const turn = document.createElement('article');
+  turn.className = sender === 'user' ? 'turn turn-user' : 'turn';
 
-  const body = document.createElement('div');
-  body.className = 'msg-body';
-
-  const role = document.createElement('div');
-  role.className = 'msg-role';
-  setText(role, sender === 'user' ? 'You' : 'CODDY');
-
+  const role = makeEl('div', 'turn-role', sender === 'user' ? 'You asked' : 'Coddy answered');
   const text = document.createElement('div');
-  text.className = 'msg-content';
+  text.className = 'turn-content';
   // Both branches are safe: user text is escaped, model text is sanitized.
   if (sender === 'user') text.textContent = content;
   else text.innerHTML = renderMarkdown(content);
 
-  body.append(role, text);
-  wrap.appendChild(body);
-  $('messages').appendChild(wrap);
+  turn.append(role, text);
+  column.appendChild(turn);
   scrollToBottom();
 
-  return { wrap, text };
+  if (sources && sources.length) appendCitations(turn, sources);
+
+  return { turn, content: text };
 }
 
-function appendCitations(card, citations) {
-  if (!citations || !citations.length) return;
-
+function appendCitations(turn, citations) {
   const box = document.createElement('div');
-  box.className = 'citations';
+  box.className = 'sources';
 
-  const label = document.createElement('div');
-  label.className = 'citations-label';
-  setText(label, 'Sources');
-
-  const chips = document.createElement('div');
-  chips.className = 'citation-chips';
+  const label = makeEl('div', 'sources-label', `Sources, ${citations.length} passage${citations.length === 1 ? '' : 's'}`);
+  const tabs = document.createElement('div');
+  tabs.className = 'source-tabs';
 
   citations.forEach((citation) => {
-    const chip = document.createElement('button');
-    chip.type = 'button';
-    chip.className = 'chip';
-    setText(chip, `[${citation.position}] ${citation.file_name} p${citation.page_number}`);
-    chip.addEventListener('click', () => showCitation(citation));
-    chips.appendChild(chip);
+    const tab = makeEl('button', 'source-tab', `${docLabel(citation.file_name)}, page ${citation.page_number}`);
+    tab.type = 'button';
+    tab.addEventListener('click', () => showCitation(citation));
+    tabs.appendChild(tab);
   });
 
-  box.append(label, chips);
-  card.querySelector('.msg-body').appendChild(box);
+  box.append(label, tabs);
+  turn.querySelector('.turn-content').after(box);
 }
+
+/* PDF, DOCX and the rest carry no extension in the chunk metadata, so the
+   file name is shown as stored rather than reconstructed. */
+function docLabel(fileName) {
+  return fileName || 'Untitled file';
+}
+
+let lastDialogFocus = null;
 
 function showCitation(citation) {
-  setText($('citation-title'), citation.file_name);
-  setText($('citation-meta'), `Segment ${citation.position} · page ${citation.page_number}`);
-  setText($('citation-body'), citation.excerpt || '');
+  setText($('citation-title'), docLabel(citation.file_name));
+  setText($('citation-meta'), `Passage ${citation.position}, page ${citation.page_number}`);
+  setText($('citation-body'), citation.excerpt || 'No text was stored for this passage.');
+  lastDialogFocus = document.activeElement;
   $('citation-modal').classList.remove('hidden');
+  $('citation-close').focus();
 }
 
-$('citation-close').addEventListener('click', () => $('citation-modal').classList.add('hidden'));
-$('citation-modal').addEventListener('click', (event) => {
-  if (event.target === $('citation-modal')) $('citation-modal').classList.add('hidden');
+function closeDialog() {
+  const modal = $('citation-modal');
+  if (modal.classList.contains('hidden')) return;
+  modal.classList.add('hidden');
+  if (lastDialogFocus && typeof lastDialogFocus.focus === 'function') lastDialogFocus.focus();
+}
+
+$('citation-close').addEventListener('click', closeDialog);
+
+$('citation-modal').addEventListener('mousedown', (event) => {
+  if (event.target === $('citation-modal')) closeDialog();
 });
-document.addEventListener('keydown', (event) => {
-  if (event.key === 'Escape') $('citation-modal').classList.add('hidden');
+
+// Tab stays inside the dialog while it is open.
+$('citation-modal').addEventListener('keydown', (event) => {
+  if (event.key !== 'Tab') return;
+  const focusable = $('citation-modal').querySelectorAll(
+    'button, [href], input, select, textarea, [tabindex]:not([tabindex="-1"])',
+  );
+  if (!focusable.length) return;
+  const first = focusable[0];
+  const last = focusable[focusable.length - 1];
+  if (event.shiftKey && document.activeElement === first) {
+    event.preventDefault();
+    last.focus();
+  } else if (!event.shiftKey && document.activeElement === last) {
+    event.preventDefault();
+    first.focus();
+  }
 });
 
 function scrollToBottom() {
   const box = $('messages');
   box.scrollTop = box.scrollHeight;
 }
+
+// ---------------------------------------------------------------------------
+// Drawer (narrow screens)
+// ---------------------------------------------------------------------------
+let lastNavFocus = null;
+
+function setNav(open) {
+  const app = $('app');
+  const toggle = $('nav-toggle');
+  const navIsOpen = app.classList.contains('nav-open');
+  if (open === navIsOpen) return;
+
+  app.classList.toggle('nav-open', open);
+  toggle.setAttribute('aria-expanded', String(open));
+  toggle.setAttribute(
+    'aria-label',
+    open ? 'Hide conversations and documents' : 'Show conversations and documents',
+  );
+
+  if (open) {
+    lastNavFocus = document.activeElement;
+    $('new-chat-btn').focus();
+  } else if (lastNavFocus && typeof lastNavFocus.focus === 'function') {
+    lastNavFocus.focus();
+  }
+}
+
+$('nav-toggle').addEventListener('click', () => setNav(!$('app').classList.contains('nav-open')));
+$('nav-scrim').addEventListener('click', () => setNav(false));
+
+document.addEventListener('keydown', (event) => {
+  if (event.key !== 'Escape') return;
+  if (!$('citation-modal').classList.contains('hidden')) closeDialog();
+  else if ($('app').classList.contains('nav-open')) setNav(false);
+});
 
 // ---------------------------------------------------------------------------
 // Chat streaming
@@ -487,7 +663,10 @@ async function sendMessage(event) {
   const input = $('query');
   const query = input.value.trim();
   if (!query) return;
-  if (!state.sessionId) return;
+  if (!state.sessionId) {
+    sessionFault('No conversation is open.', 'Start a new one from the sidebar.');
+    return;
+  }
 
   input.value = '';
   input.style.height = 'auto';
@@ -498,15 +677,13 @@ async function sendMessage(event) {
   setText($('chat-title'), query.slice(0, 50));
 
   const card = appendMessage('assistant', '');
-  const content = card.text;
-
-  const indicator = document.createElement('div');
-  indicator.className = 'thinking';
-  indicator.innerHTML = '<span class="dot"></span><span class="dot"></span><span class="dot"></span>';
-  content.replaceChildren(indicator);
+  const content = card.content;
+  card.turn.setAttribute('aria-busy', 'true');
+  content.replaceChildren(makeEl('p', 'working', 'Searching your documents'));
 
   let accumulated = '';
   let citations = null;
+  let frameQueued = false;
 
   try {
     const response = await fetch('/api/chat', {
@@ -563,8 +740,16 @@ async function sendMessage(event) {
           }
           if (event.token) {
             accumulated += event.token;
-            content.innerHTML = renderMarkdown(accumulated);
-            scrollToBottom();
+            // One textContent write per frame instead of a markdown parse per
+            // token. The full parse happens once, below.
+            if (!frameQueued) {
+              frameQueued = true;
+              requestAnimationFrame(() => {
+                frameQueued = false;
+                if (accumulated) content.textContent = accumulated;
+                scrollToBottom();
+              });
+            }
           }
           if (event.citations) citations = event.citations;
         }
@@ -573,39 +758,31 @@ async function sendMessage(event) {
     }
 
     if (streamError) {
-      content.replaceChildren();
-      const fail = document.createElement('p');
-      fail.className = 'error';
-      setText(fail, streamError);
-      content.appendChild(fail);
+      content.replaceChildren(makeEl('p', 'fault', streamError));
     } else if (!accumulated) {
-      content.replaceChildren();
-      const blank = document.createElement('p');
-      blank.className = 'muted';
-      setText(blank, 'The model returned an empty response.');
-      content.appendChild(blank);
+      content.replaceChildren(makeEl('p', 'muted', 'The model returned an empty answer.'));
+    } else {
+      content.innerHTML = renderMarkdown(accumulated);
     }
 
-    appendCitations(card.wrap, citations);
+    if (citations && citations.length) appendCitations(card.turn, citations);
     await loadSessions();
   } catch (err) {
-    content.replaceChildren();
-    const fail = document.createElement('p');
-    fail.className = 'error';
-    setText(fail, err.message);
-    content.appendChild(fail);
+    content.replaceChildren(makeEl('p', 'fault', err.message));
   } finally {
+    card.turn.setAttribute('aria-busy', 'false');
     state.busy = false;
     $('send-btn').disabled = false;
     input.focus();
   }
 }
 
-// Auto-grow the textarea.
+// Auto-grow, capped generously here so the CSS max-height governs. The
+// textarea scrolls, so nothing is clipped when the cap is reached.
 $('query').addEventListener('input', (event) => {
   const el = event.target;
   el.style.height = 'auto';
-  el.style.height = `${Math.min(el.scrollHeight, 180)}px`;
+  el.style.height = `${el.scrollHeight}px`;
 });
 
 $('query').addEventListener('keydown', (event) => {
@@ -618,16 +795,46 @@ $('query').addEventListener('keydown', (event) => {
 // ---------------------------------------------------------------------------
 // Boot
 // ---------------------------------------------------------------------------
-(async function init() {
-  wireAuth();
-  if (!state.token) {
-    showAuth();
-    return;
-  }
+function showBootFault(message) {
+  $('app').classList.add('hidden');
+  $('boot').classList.remove('hidden');
+  setText($('boot-note'), 'The local session could not be started');
+  setText($('boot-error'), message);
+  $('boot-retry').classList.remove('hidden');
+}
+
+async function start() {
+  $('boot-retry').classList.add('hidden');
+  $('boot-error').textContent = '';
+  setText($('boot-note'), 'Starting the local session');
   try {
-    await enterApp();
-  } catch (_) {
-    // Token is stale or rejected; fall back to the sign-in screen.
-    signOut();
+    await localSession();
+    state.user = await api('/api/auth/profile');
+    $('boot').classList.add('hidden');
+    $('app').classList.remove('hidden');
+    await Promise.all([loadSessions(), loadDocuments(), loadStatus()]);
+    await createSession();
+  } catch (err) {
+    showBootFault(err.message);
   }
+}
+
+$('boot-retry').addEventListener('click', start);
+
+(async function init() {
+  if (state.token) {
+    // A stored token may still be valid. Try it before asking for a new one.
+    try {
+      state.user = await api('/api/auth/profile');
+      $('boot').classList.add('hidden');
+      $('app').classList.remove('hidden');
+      await Promise.all([loadSessions(), loadDocuments(), loadStatus()]);
+      await createSession();
+      return;
+    } catch (_) {
+      state.token = '';
+      localStorage.removeItem(TOKEN_KEY);
+    }
+  }
+  await start();
 })();
