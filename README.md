@@ -6,7 +6,7 @@ grounded in those documents with citations pointing back at the source.
 Everything runs on your machine. No hosted API is called: retrieval and generation
 both execute locally, and the only network access is the one-time model download.
 
-![status](https://img.shields.io/badge/tests-49%20passing-brightgreen)
+![status](https://img.shields.io/badge/tests-104%20passing-brightgreen)
 
 ---
 
@@ -65,8 +65,12 @@ Run:
 uvicorn backend.main:app --reload
 ```
 
-Open <http://127.0.0.1:8000> and create the first account — it becomes the
-administrator. Everyone after that is a regular user.
+Open <http://127.0.0.1:8000>. There is no sign-in step: the server provisions a
+single local account on first use and the browser picks up a session from it. The
+account owns your documents and cannot be signed into — its password is a random
+secret generated once and discarded — so **anyone who can reach the port can read
+your documents**. Bind to localhost, as above, and it is reachable only from your
+own machine.
 
 ## Configuration
 
@@ -87,14 +91,30 @@ that matter most:
 
 ## Performance
 
-Measured on an RTX 3050 Laptop (6GB VRAM), Qwen3-4B-Instruct-2507 at 4-bit nf4:
+Measured on an RTX 3050 Laptop (6GB VRAM), Qwen3-4B-Instruct-2507 at 4-bit nf4,
+warm page cache, one short document indexed:
 
 | | |
 |---|---|
-| Model load | ~18s, once per process — on a background thread at startup |
-| Peak VRAM | 2.6GB of 6GB |
-| Time to first token | ~0.6s warm, ~1.4s on a 1500-token prompt |
+| Heavy library imports | ~8s, once per process, backgrounded at startup |
+| Model load | ~18s, once per process, backgrounded at startup |
+| Embedding model load | ~6s, once per process, backgrounded at startup |
+| Ready to answer | **~32s after launch** |
+| First question from cold | ~29s if sent during warm-up, ~7s once warm |
+| Question, everything warm | ~5.9s complete |
+| Time to first token | ~0.6s warm |
 | **Decode throughput** | **8–9 tok/s short bursts, ~5 tok/s sustained** |
+| VRAM with both models resident | 4.4GB of 6GB |
+
+The first question of a session is the slow one, and it is slow for a reason worth
+knowing: nothing is answered until the 4B model is resident, and reading 7.7GB of
+weights off disk takes about 18 seconds. The UI names which wait you are in, so a
+slow start is not a mystery. Setting `PREWARM_MODEL=false` moves that cost onto
+your first question instead of hiding it in the background.
+
+The embedding model is kept on the GPU, which is why VRAM sits at 4.4GB rather
+than 2.6GB. `EMBEDDING_DEVICE=cpu` frees that 1.8GB and speeds up the model load,
+at the cost of a few tens of milliseconds per query. Worth doing on a 6GB card.
 
 Decode speed is stable — measurements over a sustained 150-token generation
 showed no thermal decay, and prompt length, sampling, `repetition_penalty` and
