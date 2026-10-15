@@ -181,13 +181,6 @@ h3,
   color: var(--ink-3);
 }
 
-.mono {
-  font-family: var(--mono);
-  font-size: 0.75rem;
-  color: var(--ink-3);
-  font-variant-numeric: tabular-nums;
-}
-
 .hidden {
   display: none !important;
 }
@@ -564,6 +557,13 @@ h3,
   border-color: var(--danger);
 }
 
+/* Rows are refused mid-stream by openSession. Dimmed and marked, so a click
+   does not simply vanish. */
+.ledger button.label[aria-disabled="true"] {
+  color: var(--ink-3);
+  cursor: default;
+}
+
 .rename-input {
   flex: 1;
   min-width: 0;
@@ -799,6 +799,14 @@ h3,
   border: 1px solid var(--rule);
   padding: 0.3rem 0.55rem;
   text-align: left;
+}
+
+/* A column that is fetching, rather than the empty state it would otherwise
+   have to stand in for. Same register as the working line during generation. */
+.notice {
+  font-family: var(--sans);
+  font-size: 0.9375rem;
+  color: var(--ink-3);
 }
 
 /* MOTION is 1, so the generating state is a static line of text rather than a
