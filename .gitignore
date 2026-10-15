@@ -17,6 +17,8 @@ venv/
 uploads/
 vector_store/
 *.db
+*.db-shm
+*.db-wal
 *.sqlite3
 
 # Editors / OS
