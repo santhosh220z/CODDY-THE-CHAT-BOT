@@ -282,15 +282,6 @@ class RagPipeline:
     # Entry points
     # ------------------------------------------------------------------
     @classmethod
-    def answer(cls, query: str, db: Session, user: User, llm) -> Dict[str, Any]:
-        chunks = cls.retrieve(query, db, user)
-        prompt, system = cls.build_prompt(query, cls.recent_history(db, _session_of(db, user)), chunks)
-        return {
-            "answer": llm.generate(prompt, system_prompt=system),
-            "citations": cls.build_citations(chunks),
-        }
-
-    @classmethod
     def stream(
         cls, query: str, session_id: str, db: Session, user: User, llm
     ) -> Generator[Dict[str, Any], None, None]:
@@ -310,16 +301,3 @@ class RagPipeline:
             yield {"type": "error", "message": "The model failed to generate a response."}
 
         yield {"type": "citations", "citations": cls.build_citations(chunks)}
-
-
-def _session_of(db: Session, user: User) -> str:
-    """Most recent session for this user. Used by the non-streaming path."""
-    from backend.models.models import ChatSession
-
-    session = db.execute(
-        select(ChatSession)
-        .where(ChatSession.user_id == user.id)
-        .order_by(ChatSession.created_at.desc())
-        .limit(1)
-    ).scalar_one_or_none()
-    return session.id if session else ""
