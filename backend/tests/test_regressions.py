@@ -6,7 +6,9 @@ test asserted the wrong thing.
 """
 
 import os
+import re
 import threading
+import time
 
 import pytest
 
@@ -382,3 +384,71 @@ def test_model_loaded_is_false_when_the_provider_is_not_built(client, monkeypatc
 
     assert body["model_loaded"] is False
     assert "details" not in body
+
+# ---------------------------------------------------------------------------
+# 10. Concurrent heavy imports corrupted the accelerate module
+# ---------------------------------------------------------------------------
+def test_concurrent_first_embedding_loads_share_one_model(monkeypatch):
+    """Two threads missing the cache together both entered the import.
+
+    sentence_transformers and transformers share an import cycle through
+    accelerate, so two threads importing them at once left a partially
+    initialised module and 500'd every upload until the process restarted.
+    The lock is now held across the load, not just the cache lookup.
+    """
+    from backend.rag import embeddings
+
+    sentinel = object()
+    calls = []
+
+    def fake_load(name):
+        calls.append(name)
+        # Widen the window the race used to slip through.
+        time.sleep(0.05)
+        return sentinel
+
+    monkeypatch.setattr(embeddings, "_model_cache", {})
+    monkeypatch.setattr(embeddings.EmbeddingManager, "_load", staticmethod(fake_load))
+
+    results = []
+    barrier = threading.Barrier(2)
+
+    def worker():
+        barrier.wait()
+        results.append(embeddings.EmbeddingManager.get_model())
+
+    threads = [threading.Thread(target=worker) for _ in range(2)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=10)
+
+    assert len(calls) == 1, f"the model was loaded {len(calls)} times"
+    assert results == [sentinel, sentinel], results
+
+
+def test_warm_up_covers_the_embedding_model():
+    """Left to the first request it cost about six seconds, paid on whichever
+    came first: the upload or the question."""
+    import inspect
+
+    from backend.services.llm import warm_up_in_background
+
+    source = inspect.getsource(warm_up_in_background)
+    assert "EmbeddingManager.preload()" in source
+
+
+def test_heavy_imports_happen_under_the_load_lock():
+    """The lock covers the imports only. Holding it across the 30 second model
+    load would make every upload queue behind warm-up, trading a rare 500 for
+    a guaranteed wait."""
+    import inspect
+
+    from backend.services.llm import warm_up_in_background
+
+    source = inspect.getsource(warm_up_in_background)
+    guarded = re.search(r"with load_lock:\n(.*?)\n\n", source, re.DOTALL)
+    assert guarded, "the heavy imports are not under the load lock"
+    block = guarded.group(1)
+    for module in ("sentence_transformers", "torch", "transformers"):
+        assert module in block, f"{module} imported outside the lock"
