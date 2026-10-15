@@ -27,10 +27,18 @@ VALID_PASSWORD = "ValidPass123!"
 
 @pytest.fixture()
 def engine(tmp_path, monkeypatch):
-    """Isolated database and vector store per test."""
-    monkeypatch.setenv("UPLOAD_DIR", str(tmp_path / "uploads"))
-    monkeypatch.setenv("CHROMA_DB_PATH", str(tmp_path / "chroma"))
-    monkeypatch.setenv("FAISS_DB_PATH", str(tmp_path / "faiss"))
+    """Isolated database and vector store per test.
+
+    The paths are patched onto the settings singleton, not the environment.
+    `settings` is constructed once at import time, so setting the environment
+    variable here had no effect: the suite wrote into the developer's real
+    uploads/ and vector_store/, and left fixtures there between runs.
+    """
+    from backend.utils.config import settings
+
+    monkeypatch.setattr(settings, "UPLOAD_DIR", str(tmp_path / "uploads"))
+    monkeypatch.setattr(settings, "CHROMA_DB_PATH", str(tmp_path / "chroma"))
+    monkeypatch.setattr(settings, "FAISS_DB_PATH", str(tmp_path / "faiss"))
 
     engine = create_engine(
         "sqlite://",
@@ -53,11 +61,21 @@ def session(engine):
 
 
 @pytest.fixture()
-def client(engine):
+def client(engine, monkeypatch):
     """TestClient wired to the in-memory database."""
+    from backend.api import chat as chat_module
+    from backend.database import connection
     from backend.main import create_app
 
     factory = sessionmaker(bind=engine, autoflush=False, expire_on_commit=False)
+
+    # Redirect the module-level engine and session factory, not just the
+    # dependency. The app lifespan calls init_db(), and the SSE generator in
+    # api/chat.py opens SessionLocal() directly, so overriding only get_db
+    # left both reaching the real SQLite file while tests ran.
+    monkeypatch.setattr(connection, "engine", engine)
+    monkeypatch.setattr(connection, "SessionLocal", factory)
+    monkeypatch.setattr(chat_module, "SessionLocal", factory)
 
     def override_get_db():
         db = factory()
