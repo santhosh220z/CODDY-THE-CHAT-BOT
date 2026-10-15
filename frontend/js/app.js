@@ -34,6 +34,10 @@ const state = {
   token: localStorage.getItem(TOKEN_KEY) || '',
   sessionId: null,
   busy: false,
+  // Mirrors #model-dot. The first question used to say "Searching your
+  // documents" while it was actually waiting on a 20 second model load, so a
+  // slow start was indistinguishable from a hung request.
+  modelReady: false,
 };
 
 // ---------------------------------------------------------------------------
@@ -553,6 +557,7 @@ async function loadStatus() {
     const model = detail.model_id || health.model || health.llm || 'model';
 
     if (health.model_loaded) {
+      state.modelReady = true;
       dot.dataset.state = 'ready';
       const vram = detail.vram_total_gb ? `, ${detail.vram_total_gb}GB` : '';
       setText(label, `${model}${detail.quantization ? `, ${detail.quantization}` : ''}${vram}`);
@@ -560,6 +565,7 @@ async function loadStatus() {
       return;
     }
 
+    state.modelReady = false;
     statusAttempts += 1;
     dot.dataset.state = 'warming';
     setText(label, `${model}, not loaded yet`);
@@ -767,7 +773,16 @@ async function sendMessage(event) {
   const card = appendMessage('assistant', '');
   const content = card.content;
   card.turn.setAttribute('aria-busy', 'true');
-  content.replaceChildren(makeEl('p', 'working', 'Searching your documents'));
+  // Say which wait this is. Loading the weights is a one-time cost and looks
+  // like a hang if it is not named; the text is the whole feedback, since the
+  // tokens arriving are the only motion this screen has.
+  content.replaceChildren(makeEl(
+    'p',
+    'working',
+    state.modelReady
+      ? 'Searching your documents'
+      : 'Loading the model, this only happens on the first question',
+  ));
 
   let accumulated = '';
   let citations = null;
