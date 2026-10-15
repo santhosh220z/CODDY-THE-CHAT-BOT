@@ -7,7 +7,15 @@ from backend.utils.config import settings
 from backend.utils.logging import logger
 
 _model_cache: Dict[str, object] = {}
-_lock = threading.Lock()
+# Held across the whole load, not just the cache lookup, and also held by the
+# model warm-up thread in services/llm.py. transformers and
+# sentence_transformers share an import cycle through accelerate, and entering
+# it from two threads at once leaves both with a partially initialised module:
+# a request importing one while the warm-up imports the other raised
+# KeyError: 'accelerate' and failed every upload with a 500 until restart.
+# Heavy third-party imports are not thread-safe against each other, so every
+# one of them goes through this lock.
+load_lock = threading.Lock()
 
 
 def _resolve_device() -> Optional[str]:
@@ -41,30 +49,27 @@ class EmbeddingManager:
     def get_model(cls, model_name: Optional[str] = None):
         name = model_name or settings.EMBEDDING_MODEL_NAME
 
-        with _lock:
+        with load_lock:
             if name in _model_cache:
                 return _model_cache[name]
 
-        logger.info(f"Loading embedding model: {name}")
-        try:
-            model = cls._load(name)
-        except Exception as exc:
-            logger.error(f"Could not load embedding model '{name}': {exc}")
-            default = "sentence-transformers/all-MiniLM-L6-v2"
-            with _lock:
+            logger.info(f"Loading embedding model: {name}")
+            try:
+                model = cls._load(name)
+            except Exception as exc:
+                logger.error(f"Could not load embedding model '{name}': {exc}")
+                default = "sentence-transformers/all-MiniLM-L6-v2"
                 if default in _model_cache:
                     return _model_cache[default]
-            model = cls._load(default)
-            with _lock:
+                model = cls._load(default)
                 _model_cache[default] = model
                 # Cache under the broken name too so the retry cost is paid once.
                 _model_cache[name] = model
-            return model
+                return model
 
-        with _lock:
             _model_cache[name] = model
-        logger.info(f"Embedding model ready: {name}")
-        return model
+            logger.info(f"Embedding model ready: {name}")
+            return model
 
     @classmethod
     def embed_query(cls, text: str, model_name: Optional[str] = None) -> List[float]:
