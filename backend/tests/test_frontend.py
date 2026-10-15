@@ -100,9 +100,10 @@ def test_model_output_is_sanitised(js_code):
 def test_user_controlled_values_use_textcontent(js_code):
     assert re.search(r"sender === 'user'\) text\.textContent", js_code)
     # Session titles are derived from the user's own chat query.
-    assert "setText(label, session.title)" in js_code
-    # Uploaded filenames are user-controlled too.
-    assert re.search(r"setText\(label, `\$\{doc\.name\}", js_code)
+    assert "setText(open, session.title)" in js_code
+    # Uploaded filenames are user-controlled too. The name sits in its own
+    # cell and the size in a separate mono column.
+    assert "setText(label, doc.name)" in js_code
     # And must never be assigned to innerHTML anywhere.
     assert not re.search(r"innerHTML[^;]*doc\.name", js_code)
 
