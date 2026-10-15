@@ -305,3 +305,14 @@ def test_boot_paths_do_not_duplicate_the_enter_sequence(js):
     assert "async function enterApp(" in js
     assert js.count("await Promise.all([loadSessions(), loadDocuments(), loadStatus()])") == 1
     assert "state.user" not in js, "assigned twice and never read"
+
+def test_working_label_names_the_wait_it_is_in(js_code):
+    """The first question said "Searching your documents" while it was actually
+    blocked on a 20 second model load, so a slow start was indistinguishable
+    from a hung request."""
+    assert "modelReady" in js_code
+    assert "this only happens on the first question" in js_code
+    # The wording must follow the readiness the health probe already reports,
+    # not a new event invented to carry it.
+    assert "state.modelReady = true" in js_code
+    assert "state.modelReady = false" in js_code
