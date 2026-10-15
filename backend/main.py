@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import json
 import os
 from contextlib import asynccontextmanager
 from typing import Any, Dict
@@ -125,8 +124,13 @@ def create_app() -> FastAPI:
 
             existing = llm_module._provider
             if existing is not None and hasattr(existing, "info"):
-                payload["model_loaded"] = getattr(existing, "_model", None) is not None
-                payload["details"] = existing.info()
+                # info() is the authority on readiness. Reading a
+                # provider-specific attribute instead reported loaded: false
+                # forever for Ollama, which is always resident but carries no
+                # model attribute to inspect.
+                details = existing.info()
+                payload["details"] = details
+                payload["model_loaded"] = bool(details.get("loaded", False))
         except Exception:
             logger.debug("Provider introspection failed", exc_info=True)
 
