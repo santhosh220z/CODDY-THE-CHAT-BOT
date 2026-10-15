@@ -5,7 +5,7 @@ import os
 import uuid
 from typing import List
 
-from fastapi import APIRouter, Depends, File, HTTPException, Request, UploadFile, status
+from fastapi import APIRouter, Depends, File, HTTPException, UploadFile, status
 from pydantic import BaseModel
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -56,13 +56,21 @@ def _can_access(user: User, document: Document) -> bool:
     return user.role == "admin" or document.owner_id == user.id
 
 
-async def _save_upload(file: UploadFile) -> tuple[str, int]:
+async def _save_upload(file: UploadFile) -> tuple[str, int, str]:
     """Stream to disk, enforcing the size cap as we go.
 
     The file is never named by the client, so a crafted name cannot escape the
     upload directory.
+
+    Returns the path on disk, its size, and the display name to record. The
+    name is truncated before the extension is taken from it, because
+    `process_document` re-derives the extension from the stored name later.
+    Validating one string and storing a different one let a name over 512
+    characters clear the allow-list on its real extension, then fail
+    extraction on the empty one, after the file was already committed.
     """
-    ext = _validate_extension(file.filename or "upload")
+    display_name = (file.filename or "upload")[:512]
+    ext = _validate_extension(display_name)
     os.makedirs(settings.UPLOAD_DIR, exist_ok=True)
 
     stored_name = f"{uuid.uuid4().hex}{ext}"
@@ -99,7 +107,8 @@ async def _save_upload(file: UploadFile) -> tuple[str, int]:
             if ext not in _TEXTUAL:
                 _check_magic(ext, _header_of(destination))
     except HTTPException:
-        os.remove(destination) if os.path.exists(destination) else None
+        if os.path.exists(destination):
+            os.remove(destination)
         raise
     except Exception as exc:
         if os.path.exists(destination):
@@ -116,7 +125,7 @@ async def _save_upload(file: UploadFile) -> tuple[str, int]:
             os.remove(destination)
             raise
 
-    return destination, written
+    return destination, written, display_name
 
 
 def _header_of(path: str) -> bytes:
@@ -149,11 +158,13 @@ async def upload_document(
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ) -> dict:
-    path, size = await _save_upload(file)
-    ext = os.path.splitext(path)[1].lower()
+    path, size, display_name = await _save_upload(file)
+    # The stored name and the validated name are the same string, so the
+    # extension the allow-list accepted is the one the processor will see.
+    ext = os.path.splitext(display_name)[1].lower()
 
     document = Document(
-        name=(file.filename or f"document{ext}")[:512],
+        name=display_name,
         file_type=ext.lstrip("."),
         size_bytes=size,
         storage_path=path,
