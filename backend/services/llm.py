@@ -139,18 +139,62 @@ def warm_up_in_background() -> None:
     is answering requests immediately while the weights load, instead of the
     first user waiting for it. Failures are logged and ignored: the request
     path will retry and surface the error properly if it is real.
+
+    The embedding model is warmed on the same thread, after the weights.
     """
     import threading
+    import time
+
+    from backend.rag.embeddings import EmbeddingManager, load_lock
 
     def warm():
+        # Serialise the heavy third-party imports, and only those. transformers
+        # and sentence_transformers share an import cycle through accelerate,
+        # and entering it from two threads at once leaves a partially
+        # initialised module: a request importing one while this thread
+        # imported the other failed every upload with KeyError: 'accelerate'
+        # until the process was restarted.
+        #
+        # The lock is released before the weights load. Holding it across the
+        # load instead would make every upload queue behind 30 seconds of model
+        # loading, trading a rare 500 for a guaranteed wait.
+        try:
+            with load_lock:
+                import sentence_transformers  # noqa: F401
+                import torch  # noqa: F401
+                from transformers import AutoModelForCausalLM, AutoTokenizer  # noqa: F401
+        except Exception:
+            logger.error("Model imports failed; the first request will retry.",
+                         exc_info=True)
+            return
+
         try:
             provider = get_llm_provider()
             if hasattr(provider, "load"):
+                started = time.perf_counter()
                 logger.info("Warming up the language model in the background...")
                 provider.load()
-                logger.info("Language model ready.")
+                logger.info(
+                    f"Language model ready in {time.perf_counter() - started:.1f}s."
+                )
         except Exception:
             logger.error("Model warm-up failed; the first request will retry.",
+                         exc_info=True)
+            return
+
+        # Separate try: the embedder failing must not be reported as the
+        # language model failing, which would send the reader looking in the
+        # wrong place. Left to the first request it costs about six seconds of
+        # the user's time, paid on whichever came first: the upload or the
+        # question.
+        try:
+            started = time.perf_counter()
+            EmbeddingManager.preload()
+            logger.info(
+                f"Embedding model ready in {time.perf_counter() - started:.1f}s."
+            )
+        except Exception:
+            logger.error("Embedding warm-up failed; the first request will retry.",
                          exc_info=True)
 
     thread = threading.Thread(target=warm, name="model-warmup", daemon=True)
