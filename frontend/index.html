@@ -4,118 +4,110 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>CODDY</title>
+<meta name="description" content="A local document question answering tool. Files stay on your machine.">
 <link rel="stylesheet" href="/static/css/style.css">
 <!--
   Vendored, not CDN. Two reasons: the app runs locally and should not depend
   on network availability, and a third-party script on a page that renders
-  untrusted document text is a supply-chain risk.
+  untrusted document text is a supply-chain risk. The type stack is system
+  fonts for the same reason, so the app has no network dependency at all.
 -->
 <script src="/static/js/vendor/marked.min.js"></script>
 <script src="/static/js/vendor/purify.min.js"></script>
 </head>
 <body>
 
-<!-- ===================== AUTH ===================== -->
-<div id="auth-screen" class="auth-wrap">
-  <form class="auth-card glass" id="auth-form">
-    <div class="brand">
-      <div class="brand-mark">C</div>
-      <h1>CODDY</h1>
-      <p class="muted">Your documents, answered privately.</p>
-    </div>
-
-    <div class="tabs" role="tablist">
-      <button type="button" class="tab is-active" data-mode="login" role="tab">Sign in</button>
-      <button type="button" class="tab" data-mode="register" role="tab">Create account</button>
-    </div>
-
-    <label class="field">
-      <span>Email</span>
-      <input type="email" id="auth-email" autocomplete="username" required>
-    </label>
-
-    <label class="field">
-      <span>Password</span>
-      <input type="password" id="auth-password" autocomplete="current-password" required>
-    </label>
-
-    <p class="hint" id="auth-hint"></p>
-    <p class="error" id="auth-error" role="alert"></p>
-
-    <button type="submit" class="btn btn-primary" id="auth-submit">Sign in</button>
-    <p class="muted small">The first account created becomes the administrator.</p>
-  </form>
+<!-- ===================== BOOT ===================== -->
+<!-- There is no sign-in step: the app asks the server for a local session on
+     load. This state covers that handshake and the case where it fails. -->
+<div class="boot" id="boot">
+  <div class="boot-inner">
+    <div class="wordmark">Coddy</div>
+    <p class="note" id="boot-note">Starting the local session</p>
+    <p class="fault" id="boot-error" role="alert"></p>
+    <button type="button" class="btn btn-primary" id="boot-retry">Try again</button>
+  </div>
 </div>
 
-<!-- ===================== APP ===================== -->
+<!-- ===================== APPLICATION ===================== -->
 <div id="app" class="app hidden">
 
-  <aside class="sidebar glass">
-    <div class="sidebar-head">
-      <div class="brand-inline">
-        <div class="brand-mark sm">C</div>
-        <span>CODDY</span>
-      </div>
-      <button class="icon-btn" id="logout-btn" title="Sign out" aria-label="Sign out">
-        <svg viewBox="0 0 24 24"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4M16 17l5-5-5-5M21 12H9"/></svg>
-      </button>
+  <button type="button" class="nav-toggle" id="nav-toggle" aria-label="Show conversations and documents" aria-expanded="false" aria-controls="sidebar">
+    <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 6h18M3 12h18M3 18h18"/></svg>
+  </button>
+
+  <!-- The spine sits one tone below the page and is separated by a hairline,
+       which reads as the gutter of a bound book. -->
+  <aside class="spine" id="sidebar">
+
+    <div class="spine-head">
+      <div class="wordmark">Coddy</div>
     </div>
 
-    <button class="btn btn-primary btn-block" id="new-chat-btn">New conversation</button>
+    <div class="spine-rule"></div>
 
-    <nav class="side-section">
-      <h2>Conversations</h2>
-      <ul id="session-list" class="list"></ul>
-    </nav>
+    <section class="spine-block">
+      <div class="block-head">
+        <h2 class="block-title">Conversations</h2>
+        <button type="button" class="btn btn-quiet btn-sm" id="new-chat-btn">New</button>
+      </div>
+      <div class="list-state" id="session-state" role="status" aria-live="polite"></div>
+      <ul class="ledger" id="session-list"></ul>
+    </section>
 
-    <nav class="side-section grow">
-      <h2>Documents</h2>
-      <label class="btn btn-ghost btn-block upload-btn">
-        Upload
-        <input type="file" id="file-input" accept=".pdf,.docx,.txt,.csv,.md,.markdown" hidden>
-      </label>
-      <p class="hint" id="upload-hint"></p>
-      <ul id="document-list" class="list"></ul>
-    </nav>
+    <section class="spine-block grow">
+      <div class="block-head">
+        <h2 class="block-title">Documents</h2>
+        <button type="button" class="btn btn-quiet btn-sm" id="upload-btn">Upload</button>
+      </div>
+      <input type="file" id="file-input" class="vh" accept=".pdf,.docx,.txt,.csv,.md,.markdown" tabindex="-1">
+      <p class="note" id="upload-hint" role="status" aria-live="polite"></p>
+      <div class="list-state" id="document-state" role="status" aria-live="polite"></div>
+      <ul class="ledger" id="document-list"></ul>
+    </section>
 
-    <div class="sidebar-foot muted small" id="model-status">loading…</div>
+    <div class="spine-foot">
+      <!-- The dot marks a state the health probe actually reports, and the
+           words beside it repeat that state, so nothing depends on hue. -->
+      <span class="status-dot" id="model-dot" data-state="unknown" aria-hidden="true"></span>
+      <span class="foot-text" id="model-status">Checking the model</span>
+    </div>
   </aside>
 
-  <main class="chat">
-    <header class="chat-head glass">
-      <h2 id="chat-title">New conversation</h2>
-      <div class="head-meta">
-        <span class="pill" id="doc-count">0 documents</span>
-      </div>
+  <div class="scrim" id="nav-scrim"></div>
+
+  <main class="reading">
+
+    <header class="masthead">
+      <h1 id="chat-title">New conversation</h1>
+      <p class="masthead-meta" id="doc-count">0 documents</p>
     </header>
 
-    <div class="messages" id="messages">
-      <div class="empty" id="empty-state">
-        <h3>Ask about your documents</h3>
-        <p class="muted">Upload a PDF, DOCX, TXT, CSV or Markdown file, then ask a question.
-           Answers are grounded in what you uploaded and cite the source.</p>
-      </div>
-    </div>
+    <!-- The reading column. The measure is capped in CSS so an answer is read
+         at a comfortable line length. This is the focal point of the screen. -->
+    <div class="column" id="messages"></div>
 
-    <form class="composer glass" id="composer">
-      <textarea id="query" rows="1" placeholder="Ask a question about your documents…" required></textarea>
-      <button type="submit" class="btn btn-primary" id="send-btn" aria-label="Send">
-        <svg viewBox="0 0 24 24"><path d="M22 2 11 13M22 2l-7 20-4-9-9-4 20-7z"/></svg>
+    <form class="composer" id="composer">
+      <label class="vh" for="query">Your question</label>
+      <textarea id="query" rows="1" placeholder="Ask a question about your documents"></textarea>
+      <button type="submit" class="btn btn-primary" id="send-btn" aria-label="Send question">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M22 2 11 13M22 2l-7 20-4-9-9-4 20-7z"/></svg>
       </button>
     </form>
+
   </main>
 </div>
 
-<!-- ===================== CITATION MODAL ===================== -->
+<!-- ===================== CITATION DIALOG ===================== -->
 <div class="modal hidden" id="citation-modal" role="dialog" aria-modal="true" aria-labelledby="citation-title">
-  <div class="modal-card glass">
+  <div class="modal-card">
     <header>
-      <h3 id="citation-title"></h3>
-      <button class="icon-btn" id="citation-close" aria-label="Close">
-        <svg viewBox="0 0 24 24"><path d="M18 6 6 18M6 6l12 12"/></svg>
+      <h2 id="citation-title"></h2>
+      <button type="button" class="icon-btn" id="citation-close" aria-label="Close">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M18 6 6 18M6 6l12 12"/></svg>
       </button>
     </header>
-    <p class="muted small" id="citation-meta"></p>
+    <p class="note" id="citation-meta"></p>
     <pre id="citation-body"></pre>
   </div>
 </div>
