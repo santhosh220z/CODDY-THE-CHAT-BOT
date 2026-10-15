@@ -32,7 +32,6 @@ const THEME_KEY = 'coddy_theme';
 
 const state = {
   token: localStorage.getItem(TOKEN_KEY) || '',
-  user: null,
   sessionId: null,
   busy: false,
 };
@@ -237,10 +236,19 @@ async function loadSessions() {
       armDelete(remove, () => {
         api(`/api/chat/sessions/${session.session_id}`, { method: 'DELETE' })
           .then(() => {
-            if (state.sessionId === session.session_id) createSession();
-            else loadSessions();
+            // Returned, so a failure to replace the open conversation reaches
+            // the catch below instead of becoming an unhandled rejection that
+            // left the composer pointing at a deleted session.
+            if (state.sessionId === session.session_id) return createSession();
+            return loadSessions();
           })
-          .catch((err) => sessionFault('Could not delete that conversation.', err.message));
+          .catch((err) => {
+            state.sessionId = null;
+            $('messages').replaceChildren(emptyState());
+            loadSessions().then(
+              () => sessionFault('Could not delete that conversation.', err.message),
+            );
+          });
       });
     });
 
@@ -280,7 +288,10 @@ function beginRename(li, session) {
   input.type = 'text';
   input.value = session.title;
   input.setAttribute('aria-label', 'Conversation title');
-  input.maxLength = 300;
+  // Matches the API's cap. A client limit looser than the server's one lets a
+  // title through that the server rejects, and a rejection is the path that
+  // used to leave this row stuck.
+  input.maxLength = 200;
   li.replaceChildren(input);
   input.focus();
   input.select();
@@ -296,7 +307,9 @@ function beginRename(li, session) {
     }
     api(`/api/chat/sessions/${session.session_id}`, { method: 'PUT', body: { title: next } })
       .then(loadSessions)
-      .catch((err) => sessionFault('Could not rename that conversation.', err.message));
+      .catch((err) => loadSessions().then(
+        () => sessionFault('Could not rename that conversation.', err.message),
+      ));
   };
 
   input.addEventListener('keydown', (event) => {
@@ -338,25 +351,41 @@ function emptyState() {
 }
 
 async function openSession(sessionId) {
-  state.sessionId = sessionId;
+  // Switching conversations mid-stream would tear the column out from under
+  // the tokens still arriving, leaving the answer to generate into a detached
+  // node while the reader watches it vanish.
+  if (state.busy) return;
+
   const messages = $('messages');
-  messages.replaceChildren();
-
   setListState('session-state', { message: 'Opening conversation' });
-  try {
-    const history = await api(`/api/chat/sessions/${sessionId}/messages`);
-    setText($('chat-title'), history.length ? history[0].content.slice(0, 50) : 'Conversation');
+  // A loading state rather than an empty column: the previous content is not
+  // thrown away until the replacement has actually arrived.
+  messages.replaceChildren(columnNotice('Opening the conversation'));
 
-    if (!history.length) {
-      messages.appendChild(emptyState());
-    } else {
-      history.forEach((message) => appendMessage(message.sender, message.content, message.sources));
-    }
-    await loadSessions();
-    scrollToBottom();
+  let history;
+  try {
+    history = await api(`/api/chat/sessions/${sessionId}/messages`);
   } catch (err) {
-    sessionFault('Could not open that conversation.', err.message);
+    state.sessionId = null;
+    messages.replaceChildren(emptyState());
+    await loadSessions();
+    return sessionFault('Could not open that conversation.', err.message);
   }
+
+  state.sessionId = sessionId;
+  setText($('chat-title'), history.length ? history[0].content.slice(0, 50) : 'Conversation');
+
+  if (!history.length) {
+    messages.replaceChildren(emptyState());
+  } else {
+    history.forEach((message) => appendMessage(message.sender, message.content, message.sources));
+  }
+  await loadSessions();
+  scrollToBottom();
+}
+
+function columnNotice(text) {
+  return makeEl('p', 'notice', text);
 }
 
 $('new-chat-btn').addEventListener('click', () => {
@@ -433,7 +462,9 @@ async function loadDocuments() {
       armDelete(remove, () => {
         api(`/api/documents/${doc.id}`, { method: 'DELETE' })
           .then(loadDocuments)
-          .catch((err) => documentFault('Could not delete that document.', err.message));
+          .catch((err) => loadDocuments().then(
+            () => documentFault('Could not delete that document.', err.message),
+          ));
       });
     });
 
@@ -485,13 +516,33 @@ $('file-input').addEventListener('change', async (event) => {
 
 /* The status dot marks a real state the health probe reports, so it is polled
    only while the model is still loading. Once it is resident there is nothing
-   left to watch and the timer stops. */
+   left to watch and the timer stops.
+
+   The poll is also bounded. With prewarm disabled the provider is never built
+   until the first question, so `model_loaded` stays false indefinitely and an
+   unbounded timer would request /api/health every six seconds for the life of
+   the page while reporting a load that is not happening. After the cap it
+   stops and offers a manual re-check instead. */
+const STATUS_POLL_MS = 6000;
+const STATUS_POLL_LIMIT = 40;
+
 let statusTimer = null;
+let statusAttempts = 0;
 
 function scheduleStatus(delay) {
   clearTimeout(statusTimer);
   if (delay) statusTimer = setTimeout(loadStatus, delay);
 }
+
+function giveUpPolling() {
+  $('status-retry').classList.remove('hidden');
+}
+
+$('status-retry').addEventListener('click', () => {
+  $('status-retry').classList.add('hidden');
+  statusAttempts = 0;
+  loadStatus();
+});
 
 async function loadStatus() {
   const dot = $('model-dot');
@@ -506,11 +557,18 @@ async function loadStatus() {
       const vram = detail.vram_total_gb ? `, ${detail.vram_total_gb}GB` : '';
       setText(label, `${model}${detail.quantization ? `, ${detail.quantization}` : ''}${vram}`);
       scheduleStatus(0);
-    } else {
-      dot.dataset.state = 'warming';
-      setText(label, `${model}, loading into memory`);
-      scheduleStatus(6000);
+      return;
     }
+
+    statusAttempts += 1;
+    dot.dataset.state = 'warming';
+    setText(label, `${model}, not loaded yet`);
+    if (statusAttempts >= STATUS_POLL_LIMIT) {
+      scheduleStatus(0);
+      giveUpPolling();
+      return;
+    }
+    scheduleStatus(STATUS_POLL_MS);
   } catch (_) {
     dot.dataset.state = 'unknown';
     setText(label, 'Model status unavailable');
@@ -655,6 +713,35 @@ document.addEventListener('keydown', (event) => {
 // ---------------------------------------------------------------------------
 // Chat streaming
 // ---------------------------------------------------------------------------
+/* The rows are refused in openSession while a stream is running. Saying so is
+   better than letting the click disappear without explanation. */
+function setBusy(on) {
+  state.busy = on;
+  $('messages').setAttribute('aria-busy', String(on));
+  document.querySelectorAll('#session-list button.label').forEach((btn) => {
+    if (on) btn.setAttribute('aria-disabled', 'true');
+    else btn.removeAttribute('aria-disabled');
+  });
+}
+
+/* The streaming request cannot go through api(), because reading the body
+   needs the raw Response. So it has to repeat the refresh-and-replay contract
+   itself: without this, a token that expired mid-session left the composer
+   permanently 401ing with no way back but a page reload. */
+async function postChat(query) {
+  const send = () => fetch('/api/chat', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${state.token}` },
+    body: JSON.stringify({ query, session_id: state.sessionId }),
+  });
+
+  const response = await send();
+  if (response.status !== 401) return response;
+
+  await localSession();
+  return send();
+}
+
 $('composer').addEventListener('submit', sendMessage);
 
 async function sendMessage(event) {
@@ -673,7 +760,7 @@ async function sendMessage(event) {
   input.style.height = 'auto';
   appendMessage('user', query);
 
-  state.busy = true;
+  setBusy(true);
   $('send-btn').disabled = true;
   setText($('chat-title'), query.slice(0, 50));
 
@@ -684,14 +771,20 @@ async function sendMessage(event) {
 
   let accumulated = '';
   let citations = null;
-  let frameQueued = false;
+  // The handle is kept so it can be cancelled. A frame left pending when the
+  // stream ends fires *after* the final render below and overwrites the
+  // sanitised markdown with raw text.
+  let frame = null;
+
+  const cancelPendingFrame = () => {
+    if (frame !== null) {
+      cancelAnimationFrame(frame);
+      frame = null;
+    }
+  };
 
   try {
-    const response = await fetch('/api/chat', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${state.token}` },
-      body: JSON.stringify({ query, session_id: state.sessionId }),
-    });
+    const response = await postChat(query);
 
     if (!response.ok) {
       let detail = `Request failed (${response.status})`;
@@ -743,10 +836,9 @@ async function sendMessage(event) {
             accumulated += event.token;
             // One textContent write per frame instead of a markdown parse per
             // token. The full parse happens once, below.
-            if (!frameQueued) {
-              frameQueued = true;
-              requestAnimationFrame(() => {
-                frameQueued = false;
+            if (frame === null) {
+              frame = requestAnimationFrame(() => {
+                frame = null;
                 if (accumulated) content.textContent = accumulated;
                 scrollToBottom();
               });
@@ -757,6 +849,11 @@ async function sendMessage(event) {
         if (streamError) break;
       }
     }
+
+    // The stream is finished, so nothing may write to this node but the final
+    // render. Without this the queued frame lands afterwards and strips the
+    // answer back to plain text.
+    cancelPendingFrame();
 
     if (streamError) {
       content.replaceChildren(makeEl('p', 'fault', streamError));
@@ -769,10 +866,12 @@ async function sendMessage(event) {
     if (citations && citations.length) appendCitations(card.turn, citations);
     await loadSessions();
   } catch (err) {
+    cancelPendingFrame();
     content.replaceChildren(makeEl('p', 'fault', err.message));
   } finally {
+    cancelPendingFrame();
     card.turn.setAttribute('aria-busy', 'false');
-    state.busy = false;
+    setBusy(false);
     $('send-btn').disabled = false;
     input.focus();
   }
@@ -828,17 +927,26 @@ function showBootFault(message) {
   $('boot-retry').classList.remove('hidden');
 }
 
+/* Everything that happens once a session exists. Shared by the fresh-boot path
+   and the stored-token path, which were otherwise the same five lines twice.
+
+   The profile call is made for its side effect and the result deliberately
+   not kept: a rejection here is how a stale token is detected. */
+async function enterApp() {
+  await api('/api/auth/profile');
+  $('boot').classList.add('hidden');
+  $('app').classList.remove('hidden');
+  await Promise.all([loadSessions(), loadDocuments(), loadStatus()]);
+  await createSession();
+}
+
 async function start() {
   $('boot-retry').classList.add('hidden');
-  $('boot-error').textContent = '';
+  setText($('boot-error'), '');
   setText($('boot-note'), 'Starting the local session');
   try {
     await localSession();
-    state.user = await api('/api/auth/profile');
-    $('boot').classList.add('hidden');
-    $('app').classList.remove('hidden');
-    await Promise.all([loadSessions(), loadDocuments(), loadStatus()]);
-    await createSession();
+    await enterApp();
   } catch (err) {
     showBootFault(err.message);
   }
@@ -851,11 +959,7 @@ $('boot-retry').addEventListener('click', start);
   if (state.token) {
     // A stored token may still be valid. Try it before asking for a new one.
     try {
-      state.user = await api('/api/auth/profile');
-      $('boot').classList.add('hidden');
-      $('app').classList.remove('hidden');
-      await Promise.all([loadSessions(), loadDocuments(), loadStatus()]);
-      await createSession();
+      await enterApp();
       return;
     } catch (_) {
       state.token = '';
