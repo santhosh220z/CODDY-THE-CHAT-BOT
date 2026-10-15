@@ -230,3 +230,78 @@ def test_theme_toggle_is_reachable_without_opening_the_drawer(html):
     """
     masthead = html.split('class="masthead"')[1].split("</header>")[0]
     assert 'id="theme-toggle"' in masthead
+
+# ---------------------------------------------------------------------------
+# Streaming, state and session invariants
+# ---------------------------------------------------------------------------
+def test_pending_frame_is_cancelled_before_the_final_render(js_code):
+    """A queued animation frame outlives the stream loop.
+
+    It fired after the sanitised markdown was written and replaced it with
+    raw text, so every answer ended unformatted.
+    """
+    assert "cancelAnimationFrame" in js_code
+    assert re.search(r"frame\s*=\s*requestAnimationFrame", js_code)
+    # Scoped to sendMessage: appendMessage also renders markdown, and finding
+    # that first would compare the wrong two offsets.
+    send = js_code[js_code.index("async function sendMessage"):]
+    cancel = send.index("cancelPendingFrame();", send.index("while (!done)"))
+    render = send.index(".innerHTML = renderMarkdown(")
+    assert cancel < render, "frame cancelled after the final render"
+
+
+def test_streaming_request_refreshes_an_expired_token(js_code):
+    """/api/chat needs the raw Response to read the body, so it cannot use
+    api(). Without repeating the refresh-and-replay it 401s forever after
+    ACCESS_TOKEN_EXPIRE_MINUTES, with no way back but a reload."""
+    assert "async function postChat" in js_code
+    post_chat = js_code[js_code.index("async function postChat"):]
+    assert "localSession()" in post_chat, "streaming path skips the token refresh"
+    assert post_chat.count("send()") >= 2, "the request is never replayed"
+
+
+def test_rename_limit_matches_the_api(js, js_code):
+    """A client limit looser than the server's produces a rejection, and the
+    rejection is the path that used to leave the row stuck as a bare input."""
+    assert "input.maxLength = 200" in js_code
+    assert "input.maxLength = 300" not in js_code
+    # The row is replaced wholesale, so a failure must put it back.
+    assert "li.replaceChildren(input)" in js_code
+    rename = js_code[js_code.index("function beginRename"):js_code.index("async function openSession")]
+    assert "loadSessions()" in rename.split("catch")[-1], "failure path does not restore the row"
+
+
+def test_opening_a_conversation_is_refused_mid_stream(js_code):
+    """openSession emptied the column, so switching mid-answer detached the
+    node the tokens were still being written into."""
+    open_session = js_code[js_code.index("async function openSession"):]
+    open_session = open_session[: open_session.index("\nfunction ")]
+    assert "if (state.busy) return;" in open_session
+    # The session is claimed only once the history has actually arrived, so a
+    # failure cannot leave the composer posting to a conversation on screen.
+    assert open_session.index("await api(") < open_session.index("state.sessionId = sessionId")
+    # And the column is put back rather than left blank.
+    assert "messages.replaceChildren(emptyState())" in open_session
+
+
+def test_health_polling_is_bounded(js_code):
+    """With prewarm off the model never loads until the first question, so an
+    unbounded poll requested /api/health every six seconds for the life of the
+    page while reporting a load that was not happening."""
+    assert "STATUS_POLL_LIMIT" in js_code
+    assert "status-retry" in js_code, "no manual re-check once polling gives up"
+    assert "scheduleStatus(STATUS_POLL_MS)" in js_code
+
+
+def test_failure_inside_a_row_restores_the_list_before_reporting(js_code):
+    """loadSessions clears the list-state on success, so a fault written first
+    would be wiped. The restore has to happen, then the message."""
+    assert js_code.count("loadSessions().then(") >= 2
+    assert js_code.count("loadDocuments().then(") >= 1
+
+
+def test_boot_paths_do_not_duplicate_the_enter_sequence(js):
+    """The fresh-boot and stored-token paths were the same five lines twice."""
+    assert "async function enterApp(" in js
+    assert js.count("await Promise.all([loadSessions(), loadDocuments(), loadStatus()])") == 1
+    assert "state.user" not in js, "assigned twice and never read"
