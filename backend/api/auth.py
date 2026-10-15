@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import secrets
 import threading
 from typing import Optional
 
@@ -31,6 +32,12 @@ router = APIRouter(prefix="/api/auth", tags=["auth"])
 _registration_lock = threading.Lock()
 
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/api/auth/login", auto_error=False)
+
+# The single account the UI runs as. The web client has no sign-in step, so the
+# server provisions this row on the first request that needs it. The address is
+# never deliverable to: it names the product's own local account, and the
+# account has no usable password besides.
+LOCAL_EMAIL = "local@coddy.home"
 
 CREDENTIALS_INVALID = HTTPException(
     status_code=status.HTTP_401_UNAUTHORIZED,
@@ -103,6 +110,55 @@ def get_admin_user(current_user: User = Depends(get_current_user)) -> User:
             detail="Administrator privileges required.",
         )
     return current_user
+
+
+@router.get("/local", response_model=Token)
+def local_session(db: Session = Depends(get_db)) -> Token:
+    """Issue a session for the single local account.
+
+    The web client has no sign-in step, so the app signs itself in on boot.
+    This provisions the account on first use rather than assuming it exists,
+    which keeps a fresh database working with no setup step.
+
+    The stored password is a random secret that is generated here and thrown
+    away, so the account can own documents and pass tenant scoping but cannot
+    be signed into through `/api/auth/login`. Anyone who can reach this server
+    can obtain a session, which is the intended trade for a local tool: bind
+    it to localhost and it is reachable only from this machine.
+    """
+    with _registration_lock:
+        user = db.execute(select(User).where(User.email == LOCAL_EMAIL)).scalar_one_or_none()
+
+        if user is None:
+            user = User(
+                email=LOCAL_EMAIL,
+                hashed_password=hash_password(secrets.token_urlsafe(32)),
+                role="admin",
+                is_active=True,
+            )
+            db.add(user)
+            try:
+                db.commit()
+            except IntegrityError:
+                # Another request provisioned it between the check and insert.
+                db.rollback()
+                user = db.execute(
+                    select(User).where(User.email == LOCAL_EMAIL)
+                ).scalar_one_or_none()
+                if user is None:
+                    raise HTTPException(
+                        status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                        detail="Could not provision the local account.",
+                    )
+        db.refresh(user)
+
+    logger.info("Local session issued")
+    return Token(
+        access_token=create_access_token(subject=user.email, role=user.role),
+        token_type="bearer",
+        role=user.role,
+        email=user.email,
+    )
 
 
 @router.post("/register", status_code=status.HTTP_201_CREATED)
