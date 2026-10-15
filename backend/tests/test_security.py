@@ -359,3 +359,54 @@ def test_authentication_is_required(client):
     assert client.get("/api/documents").status_code == 401
     assert client.get("/api/chat/sessions").status_code == 401
     assert client.post("/api/chat", json={"query": "x", "session_id": "y"}).status_code == 401
+
+
+# ---------------------------------------------------------------------------
+# 11. The local session
+# ---------------------------------------------------------------------------
+def test_local_session_provisions_an_account_and_issues_a_usable_token(client, session):
+    """The UI has no sign-in step, so the server provisions its own account.
+
+    The token must be a real one that the normal auth dependency accepts, not
+    a bypass: every other guard in the app has to keep working unchanged.
+    """
+    first = client.get("/api/auth/local")
+    assert first.status_code == 200
+    body = first.json()
+    assert body["token_type"] == "bearer"
+    assert body["email"] == "local@coddy.home"
+
+    profile = client.get("/api/auth/profile", headers={"Authorization": f"Bearer {body['access_token']}"})
+    assert profile.status_code == 200
+    assert profile.json()["email"] == "local@coddy.home"
+
+    # And it owns documents like any other account, so tenant scoping applies.
+    assert client.get(
+        "/api/documents", headers={"Authorization": f"Bearer {body['access_token']}"}
+    ).status_code == 200
+
+
+def test_local_session_is_idempotent(client, session):
+    """Repeat boots must reuse the one account, never provision a second."""
+    from backend.api.auth import LOCAL_EMAIL
+    from backend.models.models import User
+
+    first = client.get("/api/auth/local").json()
+    second = client.get("/api/auth/local").json()
+
+    assert first["email"] == second["email"] == LOCAL_EMAIL
+    rows = session.query(User).filter(User.email == LOCAL_EMAIL).all()
+    assert len(rows) == 1
+
+
+def test_local_account_cannot_be_signed_into(client):
+    """The provisioned account owns documents but has no usable password.
+
+    Its stored hash is of a secret generated at provision time and discarded,
+    so the credential path cannot reach it at all.
+    """
+    assert client.get("/api/auth/local").status_code == 200
+    assert client.post(
+        "/api/auth/login",
+        json={"email": "local@coddy.home", "password": VALID_PASSWORD},
+    ).status_code == 401
