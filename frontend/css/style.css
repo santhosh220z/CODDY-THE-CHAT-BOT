@@ -1,283 +1,1048 @@
-/* CODDY - dark glass UI.
-   No framework and no CDN: this runs locally, so it should load instantly
-   and depend on nothing outside the repository. */
+/* CODDY. An archive, not a dashboard.
+   ---------------------------------------------------------------------------
+   Direction: a private reading room. The product is a local RAG tool, so the
+   whole value proposition is traceability: every answer points at a page in a
+   file you chose. The visual language is print and catalogue, not SaaS.
+
+   Dials: ENERGY 1 / RHYTHM 2 / MOTION 1.
+
+   Decisions, and the reason for each (see R-31):
+
+   Ground is aged stock (#f5f1e8), not screen white. Pure white plus hairline
+   borders is the sterile default; paper is the identity.
+   Three surfaces only: ground, one step up (composer, dialog), one step down
+   (the spine, which reads as a book gutter). No card grid.
+   Madder (#9a3521) is the accent and it appears in exactly two places: the
+   sources rule under an answer, and the marker on the conversation you are
+   reading. Those are the two moments the product is making a claim you can
+   check. Everywhere else it stays ink.
+   Serif for anything you read as language, system sans for anything you touch
+   as a control, mono strictly for file metadata. No webfonts: the app runs
+   offline, so the stack is system fonts and the serif carries the identity on
+   its own.
+   Square corners (2/4/6px). Index cards and paper clips are square. Pills are
+   the AI default.
+   No glass, no glow, no gradients, no background texture. Paper does not
+   float. The only two things that cast a shadow are the composer and the
+   dialog, the two surfaces that genuinely sit above the page.
+   MOTION is 1: hover and focus states only. There are no entrance animations
+   and no looping indicators. Tokens arriving in the reading column are the
+   motion, because that motion is the user watching their own work happen.
+
+   Every text and control pairing below was run through the contrast checker.
+   Body 15.06:1, secondary 7.08:1, metadata 5.27:1 on the sunk tone, accent
+   6.41:1, control edges 3.34:1 or better on all three surfaces.
+   --------------------------------------------------------------------------- */
 
 :root {
-  --bg: #08090e;
-  --card: rgba(18, 20, 32, 0.72);
-  --card-solid: #121420;
-  --line: rgba(255, 255, 255, 0.08);
-  --line-strong: rgba(255, 255, 255, 0.14);
+  color-scheme: light;
 
-  --text: #e8eaf2;
-  --muted: #8b90a6;
+  /* Surfaces. One ground, two steps. */
+  --paper: #f5f1e8;
+  --paper-raised: #fbf9f4;
+  --paper-sunk: #ece7db;
+  --paper-hover: #f9f6ef;
 
-  --cyan: #22d3ee;
-  --purple: #a78bfa;
-  --danger: #f87171;
-  --ok: #34d399;
+  /* Ink. Four steps, all measured against paper. */
+  --ink: #1f1c17;
+  --ink-2: #55504a;
+  --ink-3: #635d55;
 
-  --radius: 14px;
-  --radius-sm: 9px;
-  --shadow: 0 18px 48px rgba(0, 0, 0, 0.5);
+  /* Decorative hairlines only. Anything that bounds a control uses --edge. */
+  --rule: #d8d1c2;
+  --edge: #857c6d;
 
-  --font: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
-  --mono: ui-monospace, "SF Mono", "Cascadia Code", Menlo, Consolas, monospace;
+  --accent: #9a3521;
+  --accent-wash: #f2e6e0;
+  --danger: #8a2318;
+
+  /* Status. Each dot marks a state the health probe actually reports. */
+  --ready: #3f6b4a;
+  --warming: #8a6212;
+
+  --r-sm: 2px;
+  --r: 4px;
+  --r-lg: 6px;
+
+  /* Reserved for the two surfaces that sit above the page. */
+  --lift: 0 1px 2px rgba(31, 28, 23, 0.06), 0 10px 28px rgba(31, 28, 23, 0.1);
+
+  --serif: "Iowan Old Style", "Palatino Linotype", Palatino, "Book Antiqua",
+    Georgia, "Times New Roman", serif;
+  --sans: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  --mono: ui-monospace, "Cascadia Code", Menlo, Consolas, monospace;
+
+  --spine-w: 19rem;
 }
 
-* { box-sizing: border-box; margin: 0; padding: 0; }
+* {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+}
 
-html, body {
+html,
+body {
   height: 100%;
-  background: var(--bg);
-  color: var(--text);
-  font-family: var(--font);
-  font-size: 15px;
+}
+
+body {
+  background: var(--paper);
+  color: var(--ink);
+  font-family: var(--sans);
+  font-size: 1rem;
   line-height: 1.55;
   -webkit-font-smoothing: antialiased;
 }
 
-/* Ambient glow. Purely decorative. */
-body::before {
-  content: "";
-  position: fixed;
-  inset: 0;
-  pointer-events: none;
-  background:
-    radial-gradient(60rem 40rem at 12% -10%, rgba(167, 139, 250, 0.14), transparent 60%),
-    radial-gradient(50rem 34rem at 100% 0%, rgba(34, 211, 238, 0.12), transparent 55%);
+/* Type that is read as language gets the serif. Type that is touched as a
+   control stays in the system sans so the serif owns the identity. */
+h1,
+h2,
+h3,
+.wordmark,
+.turn-content {
+  font-family: var(--serif);
+  font-weight: 600;
+  letter-spacing: -0.01em;
 }
 
-.hidden { display: none !important; }
-.muted { color: var(--muted); }
-.small { font-size: 12px; }
-.error { color: var(--danger); font-size: 13px; min-height: 1em; }
-.hint { color: var(--muted); font-size: 12px; min-height: 1.1em; }
+/* No invented logo: the product name, set in the display face, is the mark. */
+.wordmark {
+  font-size: 1.5rem;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+}
 
-.glass {
-  background: var(--card);
-  border: 1px solid var(--line);
-  border-radius: var(--radius);
-  backdrop-filter: blur(16px);
-  -webkit-backdrop-filter: blur(16px);
-  box-shadow: var(--shadow);
+/* Metadata is set small and tracked. This is a catalogue convention, used in
+   four places only (block titles, role labels, sources label, the masthead
+   count), never on a heading. */
+.block-title,
+.turn-role,
+.sources-label,
+.masthead-meta {
+  font-size: 0.6875rem;
+  font-weight: 600;
+  letter-spacing: 0.07em;
+  text-transform: uppercase;
+  color: var(--ink-3);
+}
+
+.mono {
+  font-family: var(--mono);
+  font-size: 0.75rem;
+  color: var(--ink-3);
+  font-variant-numeric: tabular-nums;
+}
+
+.hidden {
+  display: none !important;
+}
+
+.vh {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  padding: 0;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  clip-path: inset(50%);
+  white-space: nowrap;
+  border: 0;
+}
+
+.muted {
+  color: var(--ink-3);
+}
+
+/* A fault says what failed. Never a colour alone (R-25, human skill). */
+.fault {
+  color: var(--danger);
+  font-size: 0.8125rem;
+  font-weight: 500;
+}
+
+.note {
+  color: var(--ink-3);
+  font-size: 0.75rem;
+  min-height: 1.2em;
+}
+
+/* Every text field in the app shares one box: a near square on the raised
+   tone, bounded by --edge so the control is findable without relying on a
+   fill difference. */
+.composer textarea,
+.rename-input {
+  width: 100%;
+  font: inherit;
+  color: var(--ink);
+  background: var(--paper-raised);
+  border: 1px solid var(--edge);
+  border-radius: var(--r-sm);
+  padding: 0.55rem 0.65rem;
+}
+
+.composer textarea::placeholder {
+  color: var(--ink-3);
+}
+
+/* One focus treatment for the whole app, 6.41:1 against every surface. */
+:where(a, button, input, textarea, select, [tabindex]):focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+  border-radius: var(--r-sm);
 }
 
 /* ---------------- buttons ---------------- */
+
 .btn {
   font: inherit;
-  font-weight: 550;
-  border: 1px solid var(--line-strong);
-  border-radius: var(--radius-sm);
-  padding: 10px 16px;
-  background: rgba(255, 255, 255, 0.05);
-  color: var(--text);
+  font-size: 0.875rem;
+  font-weight: 500;
+  color: var(--ink);
+  background: transparent;
+  border: 1px solid var(--edge);
+  border-radius: var(--r);
+  padding: 0.5rem 0.875rem;
+  min-height: 2.25rem;
   cursor: pointer;
-  transition: background 0.15s, border-color 0.15s, transform 0.08s;
+  transition: background-color 0.12s ease, border-color 0.12s ease;
 }
-.btn:hover:not(:disabled) { background: rgba(255, 255, 255, 0.09); border-color: var(--line-strong); }
-.btn:active:not(:disabled) { transform: translateY(1px); }
-.btn:disabled { opacity: 0.5; cursor: not-allowed; }
+
+.btn:hover:not(:disabled) {
+  background: var(--paper-hover);
+}
+
+.btn:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
 
 .btn-primary {
-  background: linear-gradient(135deg, rgba(167, 139, 250, 0.9), rgba(34, 211, 238, 0.9));
-  border-color: transparent;
-  color: #08090e;
-  font-weight: 650;
+  background: var(--ink);
+  border-color: var(--ink);
+  color: var(--paper);
+  font-weight: 600;
 }
-.btn-primary:hover:not(:disabled) { filter: brightness(1.08); background: linear-gradient(135deg, rgba(167,139,250,1), rgba(34,211,238,1)); }
 
-.btn-ghost { background: transparent; }
-.btn-block { display: block; width: 100%; }
+.btn-primary:hover:not(:disabled) {
+  background: #322d26;
+  border-color: #322d26;
+}
+
+.btn-quiet {
+  border-color: transparent;
+  color: var(--ink-2);
+  padding: 0.375rem 0.5rem;
+  min-height: 2rem;
+  font-size: 0.8125rem;
+}
+
+.btn-quiet:hover:not(:disabled) {
+  background: rgba(31, 28, 23, 0.06);
+  color: var(--ink);
+}
+
+.btn-sm {
+  font-size: 0.8125rem;
+  padding: 0.25rem 0.5rem;
+  min-height: 1.75rem;
+}
 
 .icon-btn {
   display: grid;
   place-items: center;
-  width: 32px;
-  height: 32px;
-  border: none;
-  border-radius: 8px;
-  background: transparent;
-  color: var(--muted);
-  cursor: pointer;
-  transition: color 0.15s, background 0.15s;
-}
-.icon-btn:hover { color: var(--text); background: rgba(255, 255, 255, 0.07); }
-.icon-btn svg { width: 16px; height: 16px; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
-
-/* ---------------- auth ---------------- */
-.auth-wrap { display: grid; place-items: center; min-height: 100vh; padding: 24px; }
-.auth-card { width: 100%; max-width: 400px; padding: 32px; }
-
-.brand { text-align: center; margin-bottom: 24px; }
-.brand h1 { font-size: 26px; letter-spacing: -0.02em; margin: 12px 0 4px; }
-.brand-mark {
-  width: 46px; height: 46px;
-  display: grid; place-items: center;
-  margin: 0 auto;
-  border-radius: 13px;
-  background: linear-gradient(135deg, var(--purple), var(--cyan));
-  color: #08090e;
-  font-weight: 800;
-  font-size: 22px;
-}
-.brand-mark.sm { width: 26px; height: 26px; font-size: 13px; border-radius: 8px; }
-
-.tabs { display: flex; gap: 4px; padding: 4px; background: rgba(255,255,255,0.04); border-radius: 10px; margin-bottom: 20px; }
-.tab {
-  flex: 1; font: inherit; font-weight: 550; font-size: 13px;
-  padding: 8px; border: none; border-radius: 7px;
-  background: transparent; color: var(--muted); cursor: pointer;
-  transition: background 0.15s, color 0.15s;
-}
-.tab.is-active { background: rgba(255,255,255,0.09); color: var(--text); }
-
-.field { display: block; margin-bottom: 14px; }
-.field span { display: block; font-size: 12px; color: var(--muted); margin-bottom: 6px; }
-.field input {
-  width: 100%; font: inherit;
-  padding: 10px 12px;
-  background: rgba(0,0,0,0.28);
-  border: 1px solid var(--line);
-  border-radius: var(--radius-sm);
-  color: var(--text);
-}
-.field input:focus { outline: none; border-color: var(--cyan); box-shadow: 0 0 0 3px rgba(34,211,238,0.14); }
-.auth-card .btn { width: 100%; margin-top: 4px; }
-.auth-card .small { text-align: center; margin-top: 14px; }
-
-/* ---------------- layout ---------------- */
-.app { display: grid; grid-template-columns: 280px 1fr; height: 100vh; gap: 14px; padding: 14px; }
-
-.sidebar { display: flex; flex-direction: column; gap: 14px; padding: 16px; overflow: hidden; }
-.sidebar-head { display: flex; align-items: center; justify-content: space-between; }
-.brand-inline { display: flex; align-items: center; gap: 9px; font-weight: 650; letter-spacing: -0.01em; }
-
-.side-section { display: flex; flex-direction: column; gap: 8px; min-height: 0; }
-.side-section.grow { flex: 1; overflow: hidden; }
-.side-section h2 {
-  font-size: 11px; font-weight: 650; text-transform: uppercase;
-  letter-spacing: 0.08em; color: var(--muted);
-}
-
-.list { list-style: none; overflow-y: auto; display: flex; flex-direction: column; gap: 4px; min-height: 0; }
-.list li {
-  display: flex; align-items: center; gap: 8px;
-  padding: 8px 10px;
-  border-radius: var(--radius-sm);
+  width: 2.25rem;
+  height: 2.25rem;
   border: 1px solid transparent;
-  font-size: 13px;
+  border-radius: var(--r);
+  background: transparent;
+  color: var(--ink-3);
   cursor: pointer;
-  transition: background 0.15s;
+  transition: color 0.12s ease, background-color 0.12s ease;
 }
-.list li:hover { background: rgba(255,255,255,0.05); }
-.list li.is-active { background: rgba(167,139,250,0.14); border-color: rgba(167,139,250,0.3); }
-.list .label { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.list .row-actions { display: flex; gap: 2px; opacity: 0; transition: opacity 0.15s; }
-.list li:hover .row-actions { opacity: 1; }
-.list .row-actions button {
-  border: none; background: transparent; color: var(--muted);
-  cursor: pointer; padding: 3px; border-radius: 5px; font-size: 11px;
+
+.icon-btn:hover {
+  color: var(--ink);
+  background: rgba(31, 28, 23, 0.06);
 }
-.list .row-actions button:hover { color: var(--text); background: rgba(255,255,255,0.1); }
-.list .row-actions button.danger:hover { color: var(--danger); }
 
-.sidebar-foot { padding-top: 4px; border-top: 1px solid var(--line); }
+.icon-btn svg {
+  width: 1.05rem;
+  height: 1.05rem;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.75;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
 
-/* ---------------- chat ---------------- */
-.chat { display: flex; flex-direction: column; gap: 12px; min-width: 0; }
-.chat-head { display: flex; align-items: center; justify-content: space-between; padding: 13px 18px; }
-.chat-head h2 { font-size: 15px; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.pill {
-  font-size: 11px; padding: 4px 10px; border-radius: 999px;
-  background: rgba(255,255,255,0.06); border: 1px solid var(--line); color: var(--muted);
+/* ---------------- boot ---------------- */
+
+/* There is no sign-in step, so the first thing the reader sees is the app
+   acquiring its session. If that fails it becomes the error state for the
+   whole shell, with the one action that recovers from it. */
+.boot {
+  display: grid;
+  place-items: center;
+  min-height: 100%;
+  padding: 1.5rem;
+}
+
+.boot-inner {
+  width: 100%;
+  max-width: 23rem;
+  text-align: left;
+  border-block: 1px solid var(--rule);
+  padding: 2.25rem 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  align-items: flex-start;
+}
+
+.boot-inner .wordmark {
+  font-size: 1.5rem;
+  letter-spacing: 0.16em;
+  margin-bottom: 0.5rem;
+}
+
+.boot-inner .note {
+  font-family: var(--serif);
+  font-size: 1.0625rem;
+  color: var(--ink-2);
+  min-height: 0;
+}
+
+.boot-inner .btn {
+  margin-top: 0.5rem;
+}
+
+/* ---------------- app shell ---------------- */
+
+.app {
+  display: grid;
+  grid-template-columns: var(--spine-w) 1fr;
+  height: 100%;
+  overflow: hidden;
+}
+
+/* The spine sits one step down and carries a hairline on its right, which is
+   the gutter of a bound book. That gutter is the identity motif and it is the
+   only structural decoration in the app. */
+.spine {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  overflow-y: auto;
+  background: var(--paper-sunk);
+  border-right: 1px solid var(--rule);
+}
+
+.spine-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+  padding: 1rem 1rem 0.75rem;
+}
+
+.spine-head .wordmark {
+  font-size: 0.9375rem;
+  letter-spacing: 0.18em;
+}
+
+.spine-rule {
+  height: 1px;
+  background: var(--rule);
+  margin: 0 1rem;
+}
+
+.spine-block {
+  display: flex;
+  flex-direction: column;
+  gap: 0.375rem;
+  padding: 1rem 1rem 0;
+  min-height: 0;
+}
+
+.spine-block.grow {
+  flex: 1;
+}
+
+.block-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+  min-height: 1.75rem;
+}
+
+/* ---------------- ledgers ---------------- */
+
+.ledger {
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  overflow-y: auto;
+}
+
+/* Two ledgers, deliberately not identical: a conversation is a single line
+   of prose, a document is a name plus figures, so the document row carries a
+   right-aligned mono column. That difference is the rhythm break (RHYTHM 2). */
+.ledger li {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.4rem 0.5rem;
+  border-radius: var(--r-sm);
+  min-height: 2.25rem;
+  font-size: 0.875rem;
+  transition: background-color 0.12s ease;
+}
+
+.ledger li:hover {
+  background: rgba(31, 28, 23, 0.05);
+}
+
+/* A document row is not selectable, so it carries no pointer affordance and
+   no pointer cursor. Only the conversation rows open something. */
+.ledger li[data-kind="document"] {
+  cursor: default;
+}
+
+.ledger .label {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--ink);
+}
+
+/* On a conversation row the label is the control that opens the thread, so it
+   is a real button. A focusable list item with a click handler would have been
+   unreachable by keyboard. */
+.ledger button.label {
+  font: inherit;
+  text-align: left;
+  background: none;
+  border: none;
+  padding: 0;
+  cursor: pointer;
+}
+
+.ledger .figures {
+  flex: none;
+  font-family: var(--mono);
+  font-size: 0.6875rem;
+  color: var(--ink-3);
+  font-variant-numeric: tabular-nums;
+}
+
+/* The active row carries a left edge and a wash. Colour is not the only
+   signal: the edge is a shape, and the row also stays marked on focus. */
+.ledger li.is-active {
+  background: var(--accent-wash);
+}
+
+.ledger li.is-active::before {
+  content: "";
+  position: absolute;
+  left: 0;
+  top: 0.3rem;
+  bottom: 0.3rem;
+  width: 2px;
+  border-radius: 1px;
+  background: var(--accent);
+}
+
+.ledger li.is-active .label {
+  font-weight: 600;
+}
+
+/* Row actions stay visible at rest and rise on hover or keyboard focus. The
+   previous version hid them at opacity 0, which hid them from touch users and
+   from anyone not hovering. */
+.row-actions {
+  display: flex;
+  gap: 0.125rem;
+  flex: none;
+  opacity: 0.55;
+  transition: opacity 0.12s ease;
+}
+
+.ledger li:hover .row-actions,
+.ledger li:focus-within .row-actions {
+  opacity: 1;
+}
+
+.row-actions button {
+  font: inherit;
+  font-size: 0.6875rem;
+  font-weight: 500;
+  color: var(--ink-3);
+  background: none;
+  border: 1px solid transparent;
+  border-radius: var(--r-sm);
+  padding: 0.15rem 0.35rem;
+  min-height: 1.5rem;
+  cursor: pointer;
+  transition: color 0.12s ease, background-color 0.12s ease;
+}
+
+.row-actions button:hover {
+  color: var(--ink);
+  background: rgba(31, 28, 23, 0.08);
+}
+
+.row-actions button.danger:hover {
+  color: var(--danger);
+}
+
+/* Two step delete. The second click commits, the label reverts on its own.
+   Replaces window.confirm, which cannot be styled and blocks the thread. */
+.row-actions button.danger.armed {
+  color: var(--paper);
+  background: var(--danger);
+  border-color: var(--danger);
+}
+
+.rename-input {
+  flex: 1;
+  min-width: 0;
+  font-size: 0.875rem;
+  padding: 0.2rem 0.35rem;
+  min-height: 1.75rem;
+}
+
+/* Empty, loading and error. Each names the cause and the next action, because
+   "No data" tells the reader nothing (R-27). */
+.list-state {
+  padding: 0.25rem 0.5rem 0.5rem;
+  font-size: 0.8125rem;
+  color: var(--ink-3);
+  display: flex;
+  flex-direction: column;
+  gap: 0.125rem;
+}
+
+.list-state .state-action {
+  margin-top: 0.375rem;
+  align-self: flex-start;
+}
+
+.list-state.is-fault {
+  color: var(--danger);
+}
+
+.list-state.is-fault .state-detail {
+  color: var(--ink-3);
+}
+
+.spine-foot {
+  margin-top: 1rem;
+  padding: 0.75rem 1rem 1rem;
+  border-top: 1px solid var(--rule);
+  display: flex;
+  align-items: baseline;
+  gap: 0.5rem;
+}
+
+.spine-foot .foot-text {
+  font-family: var(--mono);
+  font-size: 0.6875rem;
+  color: var(--ink-3);
+  line-height: 1.4;
+  overflow-wrap: anywhere;
+}
+
+/* One dot per real state, reported by the health probe. No glow, no pulse
+   (R-19). The words beside it carry the same information, so the state never
+   depends on hue alone. */
+.status-dot {
+  flex: none;
+  width: 0.5rem;
+  height: 0.5rem;
+  border-radius: 50%;
+  background: var(--ink-3);
+}
+
+.status-dot[data-state="ready"] {
+  background: var(--ready);
+}
+
+.status-dot[data-state="warming"] {
+  background: var(--warming);
+}
+
+/* ---------------- reading column ---------------- */
+
+.reading {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+}
+
+.masthead {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 1rem;
+  padding: 1rem 1.75rem 0.9rem;
+  border-bottom: 1px solid var(--rule);
+}
+
+.masthead h1 {
+  font-size: 1.25rem;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
   white-space: nowrap;
 }
 
-.messages { flex: 1; overflow-y: auto; padding: 4px 6px 4px 2px; display: flex; flex-direction: column; gap: 14px; }
-.empty { margin: auto; text-align: center; max-width: 440px; }
-.empty h3 { font-size: 19px; margin-bottom: 8px; }
+.masthead-meta {
+  flex: none;
+  white-space: nowrap;
+}
 
-.msg { display: flex; gap: 11px; max-width: 820px; width: 100%; }
-.msg.user { margin-left: auto; flex-direction: row-reverse; }
-.msg-body {
-  padding: 11px 14px;
-  border-radius: var(--radius);
-  border: 1px solid var(--line);
-  background: rgba(18,20,32,0.6);
-  min-width: 0;
+.column {
+  flex: 1;
+  overflow-y: auto;
+  padding: 1.75rem 1.75rem 2rem;
+}
+
+/* The measure is capped so an answer is read at a comfortable line length,
+   the way a column of a page is. This is the focal point of the screen. */
+.turn {
+  max-width: 42rem;
+  margin-bottom: 1.75rem;
+}
+
+/* The question is filed into the margin: indented, narrower, ruled, and set
+   in the sans because it was typed rather than written. */
+.turn-user {
+  margin-left: auto;
+  max-width: 34rem;
+  padding-left: 0.875rem;
+  border-left: 2px solid var(--rule);
+}
+
+.turn-user .turn-role {
+  text-align: right;
+}
+
+.turn-role {
+  margin-bottom: 0.25rem;
+}
+
+.turn-content {
+  font-size: 1.0625rem;
+  line-height: 1.62;
   overflow-wrap: anywhere;
 }
-.msg.user .msg-body { background: rgba(167,139,250,0.13); border-color: rgba(167,139,250,0.26); }
-.msg-role { font-size: 10px; text-transform: uppercase; letter-spacing: 0.07em; color: var(--muted); margin-bottom: 5px; }
 
-.msg-content > *:first-child { margin-top: 0; }
-.msg-content > *:last-child { margin-bottom: 0; }
-.msg-content p { margin: 0 0 9px; }
-.msg-content ul, .msg-content ol { margin: 0 0 9px 20px; }
-.msg-content li { margin-bottom: 3px; }
-.msg-content h1, .msg-content h2, .msg-content h3 { font-size: 16px; margin: 14px 0 7px; }
-.msg-content code { font-family: var(--mono); font-size: 12.5px; background: rgba(255,255,255,0.09); padding: 1.5px 5px; border-radius: 4px; }
-.msg-content pre { background: #0b0c13; border: 1px solid var(--line); border-radius: var(--radius-sm); padding: 12px; overflow-x: auto; margin: 0 0 9px; }
-.msg-content pre code { background: none; padding: 0; }
-.msg-content blockquote { border-left: 2px solid var(--line-strong); padding-left: 11px; color: var(--muted); margin: 0 0 9px; }
-.msg-content a { color: var(--cyan); }
-.msg-content table { border-collapse: collapse; margin-bottom: 9px; font-size: 13px; }
-.msg-content th, .msg-content td { border: 1px solid var(--line); padding: 5px 9px; }
-
-.thinking { display: flex; align-items: center; gap: 8px; color: var(--muted); font-size: 13px; }
-.dot { width: 5px; height: 5px; border-radius: 50%; background: var(--cyan); animation: pulse 1.2s ease-in-out infinite; }
-.dot:nth-child(2) { animation-delay: 0.2s; }
-.dot:nth-child(3) { animation-delay: 0.4s; }
-@keyframes pulse { 0%, 100% { opacity: 0.25; } 50% { opacity: 1; } }
-
-/* citations */
-.citations { margin-top: 11px; padding-top: 9px; border-top: 1px solid var(--line); }
-.citations-label { font-size: 10px; text-transform: uppercase; letter-spacing: 0.07em; color: var(--muted); margin-bottom: 6px; }
-.citation-chips { display: flex; flex-wrap: wrap; gap: 5px; }
-.chip {
-  font: inherit; font-size: 11px;
-  padding: 3px 9px; border-radius: 999px;
-  background: rgba(34,211,238,0.09);
-  border: 1px solid rgba(34,211,238,0.25);
-  color: var(--cyan);
-  cursor: pointer;
-  max-width: 260px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+.turn-content > *:first-child {
+  margin-top: 0;
 }
-.chip:hover { background: rgba(34,211,238,0.18); }
+
+.turn-content > *:last-child {
+  margin-bottom: 0;
+}
+
+.turn-content p {
+  margin: 0 0 0.8rem;
+}
+
+.turn-content ul,
+.turn-content ol {
+  margin: 0 0 0.8rem 1.25rem;
+}
+
+.turn-content li {
+  margin-bottom: 0.2rem;
+}
+
+.turn-content h1,
+.turn-content h2,
+.turn-content h3 {
+  font-size: 1.0625rem;
+  margin: 1.1rem 0 0.5rem;
+}
+
+.turn-content code {
+  font-family: var(--mono);
+  font-size: 0.8125em;
+  background: rgba(31, 28, 23, 0.07);
+  padding: 0.1em 0.3em;
+  border-radius: var(--r-sm);
+}
+
+.turn-content pre {
+  background: var(--paper-sunk);
+  border: 1px solid var(--rule);
+  border-radius: var(--r);
+  padding: 0.8rem;
+  overflow-x: auto;
+  margin: 0 0 0.8rem;
+  line-height: 1.5;
+}
+
+.turn-content pre code {
+  background: none;
+  padding: 0;
+}
+
+.turn-content blockquote {
+  border-left: 2px solid var(--rule);
+  padding-left: 0.8rem;
+  color: var(--ink-2);
+  margin: 0 0 0.8rem;
+}
+
+.turn-content a {
+  color: var(--accent);
+  text-underline-offset: 2px;
+}
+
+.turn-content table {
+  border-collapse: collapse;
+  margin-bottom: 0.8rem;
+  font-size: 0.9375rem;
+}
+
+.turn-content th,
+.turn-content td {
+  border: 1px solid var(--rule);
+  padding: 0.3rem 0.55rem;
+  text-align: left;
+}
+
+/* MOTION is 1, so the generating state is a static line of text rather than a
+   looping indicator. The tokens arriving are the motion. */
+.working {
+  color: var(--ink-3);
+  font-family: var(--sans);
+  font-size: 0.9375rem;
+}
+
+.empty {
+  max-width: 34rem;
+  padding-top: 2rem;
+}
+
+.empty h2 {
+  font-size: 1.375rem;
+  margin-bottom: 0.5rem;
+}
+
+.empty p {
+  color: var(--ink-2);
+  font-family: var(--serif);
+  font-size: 1.0625rem;
+  line-height: 1.55;
+}
+
+.empty .empty-steps {
+  margin-top: 1.25rem;
+  padding-top: 1rem;
+  border-top: 1px solid var(--rule);
+  font-family: var(--sans);
+  font-size: 0.8125rem;
+  color: var(--ink-3);
+  line-height: 1.7;
+}
+
+.empty .empty-steps strong {
+  color: var(--ink-2);
+  font-weight: 600;
+}
+
+/* ---------------- sources ---------------- */
+
+/* The accent's first and primary home. The rule plus the label say this
+   answer is checkable, and that is the product's whole claim. */
+.sources {
+  margin-top: 1rem;
+  padding-top: 0.75rem;
+  border-top: 1px solid var(--accent);
+}
+
+.sources-label {
+  color: var(--accent);
+  margin-bottom: 0.5rem;
+}
+
+.source-tabs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.375rem;
+}
+
+.source-tab {
+  font: inherit;
+  font-size: 0.75rem;
+  color: var(--accent);
+  background: var(--accent-wash);
+  border: 1px solid rgba(154, 53, 33, 0.35);
+  border-radius: var(--r-sm);
+  padding: 0.2rem 0.5rem;
+  cursor: pointer;
+  max-width: 18rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  transition: background-color 0.12s ease;
+}
+
+.source-tab:hover {
+  background: #ead8d1;
+}
 
 /* ---------------- composer ---------------- */
-.composer { display: flex; gap: 10px; align-items: flex-end; padding: 11px; }
+
+/* One of only two elevated surfaces. It is the control in constant use, so it
+   is the one thing on screen allowed to sit above the page. */
+.composer {
+  display: flex;
+  align-items: flex-end;
+  gap: 0.625rem;
+  margin: 0 1.75rem;
+  padding: 0.625rem;
+  background: var(--paper-raised);
+  border: 1px solid var(--edge);
+  border-radius: var(--r-lg);
+  box-shadow: var(--lift);
+}
+
 .composer textarea {
-  flex: 1; font: inherit; resize: none;
-  max-height: 180px;
-  padding: 9px 11px;
-  background: rgba(0,0,0,0.28);
-  border: 1px solid var(--line);
-  border-radius: var(--radius-sm);
-  color: var(--text);
+  flex: 1;
+  resize: none;
+  max-height: 11rem;
+  background: transparent;
+  border-color: transparent;
+  padding: 0.4rem 0.45rem;
 }
-.composer textarea:focus { outline: none; border-color: var(--cyan); box-shadow: 0 0 0 3px rgba(34,211,238,0.14); }
-.composer .btn { padding: 10px 12px; }
-.composer .btn svg { width: 17px; height: 17px; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
 
-/* ---------------- modal ---------------- */
-.modal { position: fixed; inset: 0; display: grid; place-items: center; background: rgba(0,0,0,0.66); backdrop-filter: blur(4px); padding: 24px; z-index: 50; }
-.modal-card { width: 100%; max-width: 620px; max-height: 80vh; display: flex; flex-direction: column; padding: 20px; }
-.modal-card header { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 4px; }
-.modal-card h3 { font-size: 15px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.composer textarea:hover {
+  border-color: transparent;
+}
+
+.composer textarea:focus-visible {
+  outline-offset: 0;
+}
+
+.composer .btn {
+  flex: none;
+  display: grid;
+  place-items: center;
+  width: 2.5rem;
+  height: 2.5rem;
+  min-height: 2.5rem;
+  padding: 0;
+}
+
+.composer .btn svg {
+  width: 1.05rem;
+  height: 1.05rem;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.75;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+/* ---------------- dialog ---------------- */
+
+.modal {
+  position: fixed;
+  inset: 0;
+  z-index: 50;
+  display: grid;
+  place-items: center;
+  padding: 1.5rem;
+  background: rgba(31, 28, 23, 0.42);
+}
+
+.modal-card {
+  width: 100%;
+  max-width: 40rem;
+  max-height: 80vh;
+  display: flex;
+  flex-direction: column;
+  background: var(--paper-raised);
+  border: 1px solid var(--edge);
+  border-radius: var(--r-lg);
+  box-shadow: var(--lift);
+  padding: 1.25rem;
+}
+
+.modal-card header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 1rem;
+}
+
+.modal-card h2 {
+  font-size: 1.0625rem;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.modal-card .note {
+  margin-top: 0.25rem;
+}
+
 .modal-card pre {
-  margin-top: 10px; padding: 13px; overflow-y: auto;
-  background: rgba(0,0,0,0.32); border: 1px solid var(--line); border-radius: var(--radius-sm);
-  font-family: var(--mono); font-size: 12.5px; white-space: pre-wrap; line-height: 1.6;
+  margin-top: 0.875rem;
+  padding: 0.875rem;
+  overflow-y: auto;
+  background: var(--paper-sunk);
+  border: 1px solid var(--rule);
+  border-radius: var(--r);
+  font-family: var(--mono);
+  font-size: 0.8125rem;
+  white-space: pre-wrap;
+  line-height: 1.6;
 }
 
-/* ---------------- responsive ---------------- */
-@media (max-width: 820px) {
-  .app { grid-template-columns: 1fr; grid-template-rows: auto 1fr; }
-  .sidebar { max-height: 42vh; }
+/* ---------------- drawer (narrow screens) ---------------- */
+
+.nav-toggle,
+.scrim {
+  display: none;
+}
+
+/* ---------------- narrow screens ---------------- */
+
+@media (max-width: 60rem) {
+  .app {
+    grid-template-columns: 1fr;
+  }
+
+  /* The spine becomes an off canvas drawer with a real toggle. It is a
+     drawer rather than a stacked panel because a document reader needs the
+     full height for the column, and because a 42vh panel clipped both
+     ledgers into unusable strips. */
+  .nav-toggle {
+    display: grid;
+    place-items: center;
+    position: fixed;
+    top: 0.625rem;
+    left: 0.625rem;
+    z-index: 40;
+    width: 2.5rem;
+    height: 2.5rem;
+    background: var(--paper-raised);
+    border: 1px solid var(--edge);
+    border-radius: var(--r);
+    color: var(--ink);
+    cursor: pointer;
+  }
+
+  .nav-toggle svg {
+    width: 1.15rem;
+    height: 1.15rem;
+    fill: none;
+    stroke: currentColor;
+    stroke-width: 1.75;
+    stroke-linecap: round;
+    stroke-linejoin: round;
+  }
+
+  .spine {
+    position: fixed;
+    z-index: 45;
+    top: 0;
+    left: 0;
+    bottom: 0;
+    width: min(21rem, 88vw);
+    border-right: 1px solid var(--edge);
+    box-shadow: var(--lift);
+    transform: translateX(-102%);
+    visibility: hidden;
+    transition: transform 0.18s ease, visibility 0.18s ease;
+  }
+
+  .app.nav-open .spine {
+    transform: translateX(0);
+    visibility: visible;
+  }
+
+  .app.nav-open .scrim {
+    display: block;
+    position: fixed;
+    inset: 0;
+    z-index: 44;
+    background: rgba(31, 28, 23, 0.42);
+  }
+
+  .masthead {
+    padding-left: 4rem;
+  }
+
+  .column {
+    padding: 1.25rem 1rem 1.5rem;
+  }
+
+  .composer {
+    margin: 0 1rem 1rem;
+  }
+}
+
+@media (max-width: 30rem) {
+  .masthead {
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 0.125rem;
+  }
+
+  .masthead h1 {
+    font-size: 1.125rem;
+    white-space: normal;
+  }
+
+  .turn {
+    margin-bottom: 1.5rem;
+  }
+
+  .turn-user {
+    max-width: none;
+  }
+
+  .composer {
+    margin: 0 0.625rem 0.625rem;
+    padding: 0.5rem;
+  }
+
+  /* Comfortable tap targets once the pointer is coarse. */
+  .ledger li {
+    min-height: 2.75rem;
+  }
+
+  .row-actions button {
+    min-height: 2.25rem;
+    padding: 0.25rem 0.5rem;
+    font-size: 0.75rem;
+  }
+
+  .btn {
+    min-height: 2.75rem;
+  }
 }
 
 @media (prefers-reduced-motion: reduce) {
-  * { animation-duration: 0.01ms !important; transition-duration: 0.01ms !important; }
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    transition-duration: 0.01ms !important;
+  }
 }
