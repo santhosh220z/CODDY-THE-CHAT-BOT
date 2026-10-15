@@ -149,3 +149,84 @@ def test_reduced_motion_is_respected(css):
 
 def test_responsive_breakpoint_exists(css):
     assert "@media" in css
+
+
+# ---------------------------------------------------------------------------
+# Themes
+# ---------------------------------------------------------------------------
+def _token_block(css, selector):
+    """The custom properties declared for one selector."""
+    pattern = re.escape(selector) + r"\s*\{(.*?)\}"
+    match = re.search(pattern, css, re.DOTALL)
+    assert match, f"no rule found for {selector}"
+    return set(re.findall(r"^\s*(--[a-z0-9-]+)\s*:", match.group(1), re.MULTILINE))
+
+
+# Tokens that are genuinely the same in both themes, so the dark block does not
+# redeclare them. Everything else is a colour and must be restated, otherwise
+# it silently renders with its light value on a dark surface.
+THEME_INVARIANT_TOKENS = {
+    "--r-sm",
+    "--r",
+    "--r-lg",
+    "--serif",
+    "--sans",
+    "--mono",
+    "--spine-w",
+}
+
+
+def test_dark_theme_defines_every_colour_token(css):
+    """R-34: a theme that ships broken is a defect.
+
+    The failure this catches is the common one: a colour token is added later
+    for a new component, the dark block is never updated, and that one
+    property keeps its light value on a dark surface.
+    """
+    light = _token_block(css, ":root")
+    dark = _token_block(css, ':root[data-theme="dark"]')
+
+    assert dark, "no dark theme block"
+    assert light - dark - THEME_INVARIANT_TOKENS == set(), (
+        f"tokens missing from the dark theme: "
+        f"{sorted(light - dark - THEME_INVARIANT_TOKENS)}"
+    )
+
+
+def test_both_themes_declare_color_scheme(css):
+    """Form controls and scrollbars follow the page only if this is set."""
+    assert "color-scheme: light" in css
+    assert re.search(r'data-theme="dark"\][^{]*\{[^}]*color-scheme:\s*dark', css, re.DOTALL)
+
+
+def test_theme_is_resolved_before_first_paint(html):
+    """The head bootstrap must come after the stylesheet but before the body.
+
+    Moving it into the body reintroduces the flash of the wrong theme.
+    """
+    assert "coddy_theme" in html
+    assert "prefers-color-scheme: dark" in html
+    head = html.split("</head>")[0]
+    assert head.index("style.css") < head.index("coddy_theme")
+
+
+def test_theme_toggle_is_wired_and_labelled(html, js):
+    assert 'id="theme-toggle"' in html
+    # Both glyphs ship; CSS shows the one matching the destination theme.
+    assert "icon-sun" in html and "icon-moon" in html
+    assert 'aria-label="Switch to dark theme"' in html
+    assert "$('theme-toggle').addEventListener('click'" in js
+    assert "localStorage.setItem(THEME_KEY, next)" in js
+    # No aria-pressed alongside a label that already names the action, which
+    # would contradict itself.
+    assert "aria-pressed" not in html
+
+
+def test_theme_toggle_is_reachable_without_opening_the_drawer(html):
+    """The spine is an off canvas drawer on narrow screens.
+
+    A control that lives only inside it cannot be reached while the drawer is
+    closed, so the toggle belongs to the masthead.
+    """
+    masthead = html.split('class="masthead"')[1].split("</header>")[0]
+    assert 'id="theme-toggle"' in masthead
