@@ -64,7 +64,18 @@
   --r: 4px;
   --r-lg: 6px;
 
-  /* Reserved for the two surfaces that sit above the page. */
+  /* Interactive washes. Tokenised because a dark ground needs the opposite
+     mix: the same near-black wash that reads as a highlight on paper is
+     invisible on it. */
+  --wash: rgba(31, 28, 23, 0.05);
+  --wash-strong: rgba(31, 28, 23, 0.08);
+  --code-bg: rgba(31, 28, 23, 0.07);
+  --scrim: rgba(31, 28, 23, 0.42);
+  --accent-line: rgba(154, 53, 33, 0.35);
+  --accent-wash-hover: #ead8d1;
+  --ink-press: #322d26;
+
+  /* Reserved for the surfaces that sit above the page. */
   --lift: 0 1px 2px rgba(31, 28, 23, 0.06), 0 10px 28px rgba(31, 28, 23, 0.1);
 
   --serif: "Iowan Old Style", "Palatino Linotype", Palatino, "Book Antiqua",
@@ -73,6 +84,48 @@
   --mono: ui-monospace, "Cascadia Code", Menlo, Consolas, monospace;
 
   --spine-w: 19rem;
+}
+
+/* Dark is the same archive read at night: a warm near-black ground the colour
+   of an old binding rather than the blue-black of a SaaS dashboard, warm
+   paper-toned ink instead of pure white, and the same madder lifted to hold
+   contrast. Every pairing was measured, not eyeballed: body 14.25:1,
+   secondary 9.18:1, metadata 5.83:1 on the lightest surface, accent 6.14:1,
+   control edges 3.93:1 or better. `color-scheme` is switched too, so form
+   controls and scrollbars follow rather than staying light on a dark page. */
+:root[data-theme="dark"] {
+  color-scheme: dark;
+
+  --paper: #1a1714;
+  --paper-raised: #221e19;
+  --paper-sunk: #14110e;
+  --paper-hover: #2b2620;
+
+  --ink: #ece5d8;
+  --ink-2: #c2b9a9;
+  --ink-3: #a2988a;
+
+  --rule: #322c26;
+  --edge: #847a6c;
+
+  --accent: #d98066;
+  --accent-wash: #35211b;
+  --danger: #e8846f;
+
+  --ready: #74b184;
+  --warming: #d6a64e;
+
+  --wash: rgba(236, 229, 216, 0.06);
+  --wash-strong: rgba(236, 229, 216, 0.1);
+  --code-bg: rgba(236, 229, 216, 0.09);
+  --scrim: rgba(0, 0, 0, 0.62);
+  --accent-line: rgba(217, 128, 102, 0.45);
+  --accent-wash-hover: #3f2820;
+  --ink-press: #efe9dd;
+
+  /* A shadow has to be darker than its ground to read. On a near-black
+     surface that means a deeper, tighter shadow rather than a soft brown. */
+  --lift: 0 1px 2px rgba(0, 0, 0, 0.5), 0 10px 28px rgba(0, 0, 0, 0.55);
 }
 
 * {
@@ -227,8 +280,8 @@ h3,
 }
 
 .btn-primary:hover:not(:disabled) {
-  background: #322d26;
-  border-color: #322d26;
+  background: var(--ink-press);
+  border-color: var(--ink-press);
 }
 
 .btn-quiet {
@@ -240,7 +293,7 @@ h3,
 }
 
 .btn-quiet:hover:not(:disabled) {
-  background: rgba(31, 28, 23, 0.06);
+  background: var(--wash);
   color: var(--ink);
 }
 
@@ -265,7 +318,7 @@ h3,
 
 .icon-btn:hover {
   color: var(--ink);
-  background: rgba(31, 28, 23, 0.06);
+  background: var(--wash);
 }
 
 .icon-btn svg {
@@ -405,7 +458,7 @@ h3,
 }
 
 .ledger li:hover {
-  background: rgba(31, 28, 23, 0.05);
+  background: var(--wash);
 }
 
 /* A document row is not selectable, so it carries no pointer affordance and
@@ -496,7 +549,7 @@ h3,
 
 .row-actions button:hover {
   color: var(--ink);
-  background: rgba(31, 28, 23, 0.08);
+  background: var(--wash-strong);
 }
 
 .row-actions button.danger:hover {
@@ -610,6 +663,32 @@ h3,
   white-space: nowrap;
 }
 
+.masthead-tools {
+  display: flex;
+  align-items: center;
+  gap: 0.25rem;
+  flex: none;
+}
+
+/* The icon shows the theme the button switches to, so it is the destination,
+   not the current state. The words in the label say the same thing, so the
+   control does not depend on recognising a glyph. */
+.theme-toggle svg {
+  display: none;
+}
+
+.theme-toggle .icon-sun {
+  display: block;
+}
+
+:root[data-theme="dark"] .theme-toggle .icon-sun {
+  display: none;
+}
+
+:root[data-theme="dark"] .theme-toggle .icon-moon {
+  display: block;
+}
+
 .column {
   flex: 1;
   overflow-y: auto;
@@ -677,7 +756,7 @@ h3,
 .turn-content code {
   font-family: var(--mono);
   font-size: 0.8125em;
-  background: rgba(31, 28, 23, 0.07);
+  background: var(--code-bg);
   padding: 0.1em 0.3em;
   border-radius: var(--r-sm);
 }
@@ -788,7 +867,7 @@ h3,
   font-size: 0.75rem;
   color: var(--accent);
   background: var(--accent-wash);
-  border: 1px solid rgba(154, 53, 33, 0.35);
+  border: 1px solid var(--accent-line);
   border-radius: var(--r-sm);
   padding: 0.2rem 0.5rem;
   cursor: pointer;
@@ -800,7 +879,7 @@ h3,
 }
 
 .source-tab:hover {
-  background: #ead8d1;
+  background: var(--accent-wash-hover);
 }
 
 /* ---------------- composer ---------------- */
@@ -865,7 +944,7 @@ h3,
   display: grid;
   place-items: center;
   padding: 1.5rem;
-  background: rgba(31, 28, 23, 0.42);
+  background: var(--scrim);
 }
 
 .modal-card {
@@ -981,7 +1060,7 @@ h3,
     position: fixed;
     inset: 0;
     z-index: 44;
-    background: rgba(31, 28, 23, 0.42);
+    background: var(--scrim);
   }
 
   .masthead {
