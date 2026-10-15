@@ -322,3 +322,63 @@ def test_chat_rejects_empty_query(client):
         json={"query": "", "session_id": session},
     )
     assert response.status_code == 422
+
+# ---------------------------------------------------------------------------
+# 8. Upload validated one filename and processed another
+# ---------------------------------------------------------------------------
+def test_upload_stores_the_name_it_validated(client):
+    """A name over the column limit used to clear the extension allow-list on
+    its real extension, then fail extraction on the truncated one, after the
+    file had been written and the Document row committed."""
+    token = client.get("/api/auth/local").json()["access_token"]
+    headers = {"Authorization": f"Bearer {token}"}
+
+    # Long enough that the 512-character cut lands inside the extension.
+    name = ("a" * 600) + ".txt"
+    response = client.post(
+        "/api/documents",
+        headers=headers,
+        files={"file": (name, b"alpha beta gamma", "text/plain")},
+    )
+
+    # Whatever happens, the stored name must still end in the allowed
+    # extension, which is what the processor re-derives it from.
+    if response.status_code == 201:
+        stored = client.get("/api/documents", headers=headers).json()[0]["name"]
+        assert stored.endswith(".txt"), stored
+        assert len(stored) <= 512, len(stored)
+    else:
+        # A clean rejection is acceptable; a 500 after committing is not.
+        assert response.status_code in (400, 413), response.status_code
+        assert client.get("/api/documents", headers=headers).json() == []
+
+
+# ---------------------------------------------------------------------------
+# 9. Health reported model_loaded false for a resident Ollama model
+# ---------------------------------------------------------------------------
+def test_model_loaded_comes_from_the_provider_not_an_attribute(client, monkeypatch):
+    """The probe used getattr(existing, "_model"), which only TransformersProvider
+    has. Ollama is always resident but carries no such attribute, so it
+    reported loaded: false forever next to details.loaded: true."""
+    from backend.services import llm as llm_module
+
+    class ResidentOllama:
+        def info(self):
+            return {"provider": "ollama", "model_id": "qwen", "loaded": True}
+
+    monkeypatch.setattr(llm_module, "_provider", ResidentOllama())
+    body = client.get("/api/health").json()
+
+    assert body["model_loaded"] is True
+    assert body["details"]["loaded"] is True
+    assert not hasattr(ResidentOllama(), "_model"), "fixture must lack _model"
+
+
+def test_model_loaded_is_false_when_the_provider_is_not_built(client, monkeypatch):
+    from backend.services import llm as llm_module
+
+    monkeypatch.setattr(llm_module, "_provider", None)
+    body = client.get("/api/health").json()
+
+    assert body["model_loaded"] is False
+    assert "details" not in body
