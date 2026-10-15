@@ -1,8 +1,6 @@
-from contextlib import contextmanager
 from typing import Iterator
 
 from sqlalchemy import create_engine, event
-from sqlalchemy.engine import Engine
 from sqlalchemy.orm import Session, sessionmaker
 
 from backend.utils.config import settings
@@ -51,16 +49,6 @@ def init_db() -> None:
 
 def get_db() -> Iterator[Session]:
     """FastAPI dependency. One session per request, always closed."""
-    db = SessionLocal()
-    try:
-        yield db
-    finally:
-        db.close()
-
-
-@contextmanager
-def session_scope() -> Iterator[Session]:
-    """Standalone transactional scope, for use outside a request."""
     db = SessionLocal()
     try:
         yield db
