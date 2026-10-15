@@ -28,6 +28,7 @@
 */
 
 const TOKEN_KEY = 'coddy_token';
+const THEME_KEY = 'coddy_theme';
 
 const state = {
   token: localStorage.getItem(TOKEN_KEY) || '',
@@ -793,6 +794,30 @@ $('query').addEventListener('keydown', (event) => {
 });
 
 // ---------------------------------------------------------------------------
+// Theme
+// ---------------------------------------------------------------------------
+/* The inline script in the head sets data-theme before first paint. This only
+   has to keep the control's label in step with it, so a screen reader is told
+   which theme it would switch to rather than which one is active. */
+function currentTheme() {
+  return document.documentElement.getAttribute('data-theme') === 'dark' ? 'dark' : 'light';
+}
+
+function applyTheme(theme) {
+  document.documentElement.setAttribute('data-theme', theme);
+  const next = theme === 'dark' ? 'light' : 'dark';
+  $('theme-toggle').setAttribute('aria-label', `Switch to ${next} theme`);
+}
+
+$('theme-toggle').addEventListener('click', () => {
+  const next = currentTheme() === 'dark' ? 'light' : 'dark';
+  try {
+    localStorage.setItem(THEME_KEY, next);
+  } catch (_) { /* storage blocked; the choice lasts this page only */ }
+  applyTheme(next);
+});
+
+// ---------------------------------------------------------------------------
 // Boot
 // ---------------------------------------------------------------------------
 function showBootFault(message) {
@@ -822,6 +847,7 @@ async function start() {
 $('boot-retry').addEventListener('click', start);
 
 (async function init() {
+  applyTheme(currentTheme());
   if (state.token) {
     // A stored token may still be valid. Try it before asking for a new one.
     try {
